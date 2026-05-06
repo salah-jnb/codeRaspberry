@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import shutil
 
 async def check():
@@ -30,6 +31,11 @@ async def check():
             "ok": False,
             "message": "Controller present, but HC05_MAC not set so HC-05 cannot be confirmed",
         }
+
+    # Validate and normalize MAC format.
+    if not re.fullmatch(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", hc05_mac):
+        return {"name": name, "ok": False, "message": f"Invalid HC05_MAC format: {hc05_mac}"}
+    hc05_mac = hc05_mac.upper()
 
     info_proc = await asyncio.create_subprocess_exec(
         "bluetoothctl", "info", hc05_mac,

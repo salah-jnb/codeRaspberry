@@ -13,7 +13,8 @@ export NEXTION_PORT=/dev/serial0
 export NEXTION_REQUIRE_GPIO_UART=1
 
 // HC-05 de l'arduino
-export HC05_MAC=98:D3:71:F5:2B:10
+export HC05_MAC=00:22:12:02:35:16
+// Regle BLE: DETECTED uniquement si bluetoothctl info indique "Connected: yes"
 
 // Audio sortie (carte ALSA exacte)
 // verifie avec: aplay -l
