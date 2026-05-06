@@ -1,11 +1,25 @@
 // initialiser environnement
 source .venv/bin/activate
 
+//cablage ecran 
+RX (Jaune/) -> Pin 8 (GPIO 14 - TX) du Raspberry Pi.
+
+TX (Bleu) -> Pin 10 (GPIO 15 - RX) du Raspberry Pi.
+
 // checks hardware fiables (evite faux positifs)
 // adapte ces valeurs a ton cablage reel
-export NEXTION_PORT=/dev/ttyUSB0
+// Nextion via pins GPIO RX/TX 8/10
+export NEXTION_PORT=/dev/serial0
+export NEXTION_REQUIRE_GPIO_UART=1
+
+// HC-05 de l'arduino
 export HC05_MAC=98:D3:71:F5:2B:10
-export AUDIO_DEVICE_KEYWORD=usb
+
+// Audio sortie (carte ALSA exacte)
+// verifie avec: aplay -l
+export AUDIO_CARD_INDEX=1
+// optionnel: label texte si besoin
+// export AUDIO_CARD_LABEL=USB Audio Device
 
 // lancer diagnostic
 python -m app.main

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import shutil
 
 async def check():
@@ -21,6 +22,52 @@ async def check():
 
     if "card" not in out_text.lower():
         return {"name": name, "ok": False, "message": "No playback devices listed by aplay"}
+
+    # Strict matching by ALSA card index (recommended for fixed hardware setup)
+    # Example line: "card 1: Device [USB Audio Device], device 0: USB Audio [USB Audio]"
+    card_pattern = re.compile(r"card\s+(\d+):\s*([^\[]+)\[([^\]]+)\]", re.IGNORECASE)
+    cards = []
+    for line in out_text.splitlines():
+        match = card_pattern.search(line)
+        if match:
+            cards.append({
+                "index": match.group(1).strip(),
+                "short": match.group(2).strip(),
+                "label": match.group(3).strip(),
+                "raw": line.strip(),
+            })
+
+    card_index = os.environ.get("AUDIO_CARD_INDEX", "").strip()
+    card_label = os.environ.get("AUDIO_CARD_LABEL", "").strip().lower()
+    if card_index:
+        for card in cards:
+            if card["index"] == card_index:
+                return {
+                    "name": name,
+                    "ok": True,
+                    "message": f"Configured ALSA card index detected: card {card_index} ({card['label']})",
+                }
+        detected = ", ".join(f"{c['index']}:{c['label']}" for c in cards) or "none"
+        return {
+            "name": name,
+            "ok": False,
+            "message": f"Configured AUDIO_CARD_INDEX={card_index} not found. Detected cards: {detected}",
+        }
+
+    if card_label:
+        for card in cards:
+            haystack = f"{card['short']} {card['label']} {card['raw']}".lower()
+            if card_label in haystack:
+                return {
+                    "name": name,
+                    "ok": True,
+                    "message": f"Configured ALSA card label matched: {card['label']}",
+                }
+        return {
+            "name": name,
+            "ok": False,
+            "message": f"Configured AUDIO_CARD_LABEL not found: {card_label}",
+        }
 
     keyword = os.environ.get("AUDIO_DEVICE_KEYWORD", "").strip().lower()
     if keyword:
