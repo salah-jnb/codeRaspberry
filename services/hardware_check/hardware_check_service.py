@@ -19,7 +19,8 @@ async def run_full_check():
 
     statuses = []
     for r, fn in zip(results, checks):
-        name = getattr(fn, "__name__", str(fn))
+        module_name = getattr(fn, "__module__", "")
+        name = module_name.split(".")[-1] if module_name else getattr(fn, "__name__", str(fn))
         if isinstance(r, Exception):
             logger.exception("Check %s raised", name)
             statuses.append({"name": name, "ok": False, "message": str(r)})
