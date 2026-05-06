@@ -2,12 +2,19 @@ import asyncio
 import os
 import re
 import shutil
+from pathlib import Path
 
 async def check():
     name = "bluetooth_check"
-    # prefer bluetoothctl if available
+    rfcomm_device = os.environ.get("HC05_RFCOMM_DEVICE", "/dev/rfcomm0").strip()
+
+    # Preferred strict validation: HC-05 is considered detected only when bound to RFCOMM.
+    if rfcomm_device and Path(rfcomm_device).exists():
+        return {"name": name, "ok": True, "message": f"HC-05 RFCOMM port detected: {rfcomm_device}"}
+
+    # Fallback to bluetoothctl only when rfcomm port is not present.
     if not shutil.which("bluetoothctl"):
-        return {"name": name, "ok": False, "message": "bluetoothctl not available"}
+        return {"name": name, "ok": False, "message": f"{rfcomm_device} not found and bluetoothctl not available"}
 
     show_proc = await asyncio.create_subprocess_exec(
         "bluetoothctl", "show",
@@ -22,14 +29,14 @@ async def check():
         return {"name": name, "ok": False, "message": f"bluetoothctl error: {err_text.strip()}"}
 
     if "Controller" not in out_text:
-        return {"name": name, "ok": False, "message": "No Bluetooth controller detected"}
+        return {"name": name, "ok": False, "message": f"No Bluetooth controller detected and {rfcomm_device} not present"}
 
     hc05_mac = os.environ.get("HC05_MAC", "").strip()
     if not hc05_mac:
         return {
             "name": name,
             "ok": False,
-            "message": "Controller present, but HC05_MAC not set so HC-05 cannot be confirmed",
+            "message": f"Controller present, but HC05_MAC not set; {rfcomm_device} not found so HC-05 cannot be confirmed",
         }
 
     # Validate and normalize MAC format.

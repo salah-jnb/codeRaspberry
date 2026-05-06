@@ -14,7 +14,10 @@ export NEXTION_REQUIRE_GPIO_UART=1
 
 // HC-05 de l'arduino
 export HC05_MAC=00:22:12:02:35:16
-// Regle BLE: DETECTED uniquement si bluetoothctl info indique "Connected: yes"
+// RFCOMM serie pour HC-05 (apres bind)
+// sudo rfcomm bind 0 00:22:12:02:35:16
+export HC05_RFCOMM_DEVICE=/dev/rfcomm0
+// Regle BLE: DETECTED uniquement si /dev/rfcomm0 existe
 
 // Audio sortie (carte ALSA exacte)
 // verifie avec: aplay -l
