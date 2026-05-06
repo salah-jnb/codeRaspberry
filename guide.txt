@@ -1,0 +1,2 @@
+//initialiser environnement 
+source .venv/bin/activate
