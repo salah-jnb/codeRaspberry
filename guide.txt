@@ -1,2 +1,11 @@
-//initialiser environnement 
+// initialiser environnement
 source .venv/bin/activate
+
+// checks hardware fiables (evite faux positifs)
+// adapte ces valeurs a ton cablage reel
+export NEXTION_PORT=/dev/ttyUSB0
+export HC05_MAC=98:D3:71:F5:2B:10
+export AUDIO_DEVICE_KEYWORD=usb
+
+// lancer diagnostic
+python -m app.main
