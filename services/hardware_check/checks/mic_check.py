@@ -26,7 +26,7 @@ async def check() -> dict:
     if "card" not in out_text.lower():
         return {"name": name, "ok": False, "message": "No capture devices listed by arecord"}
 
-    keyword = os.environ.get("RESPEAKER_KEYWORD", "seeed").strip().lower()
+    keyword = os.environ.get("RESPEAKER_KEYWORD", "respeaker").strip().lower()
     if keyword and keyword in out_text.lower():
         index_match = re.search(
             rf"card\s+(\d+):[^\n]*{re.escape(keyword)}",

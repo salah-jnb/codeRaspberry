@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import asyncio
 
+try:
+    from dotenv import load_dotenv as _load_dotenv
+except ImportError:
+    _load_dotenv = None
+
 from services.hardware_check.checks import (
     arduino_check,
     audio_check,
@@ -43,5 +48,7 @@ async def run_full_check() -> list[dict]:
 
 
 if __name__ == "__main__":
+    if _load_dotenv is not None:
+        _load_dotenv()
     for status in asyncio.run(run_full_check()):
         print(status)
