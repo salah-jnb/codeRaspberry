@@ -1,82 +1,35 @@
+from __future__ import annotations
+
 import asyncio
-import os
-import re
 import shutil
 
-async def check():
+
+async def check() -> dict:
     name = "audio_check"
-    if not shutil.which("aplay"):
-        return {"name": name, "ok": False, "message": "aplay not found (alsa-utils not installed)"}
+    if not shutil.which("paplay"):
+        return {"name": name, "ok": False, "message": "paplay not found (install pipewire-pulse)"}
+
+    if not shutil.which("wpctl"):
+        return {"name": name, "ok": False, "message": "wpctl not found (install wireplumber)"}
 
     proc = await asyncio.create_subprocess_exec(
-        "aplay", "-l",
+        "wpctl", "status",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     out, err = await proc.communicate()
-    out_text = (out or b"").decode(errors="ignore")
-    err_text = (err or b"").decode(errors="ignore")
+    text = (out or b"").decode("utf-8", errors="replace")
+    err_text = (err or b"").decode("utf-8", errors="replace").strip()
 
     if proc.returncode != 0:
-        return {"name": name, "ok": False, "message": f"aplay error: {err_text.strip()}"}
+        return {"name": name, "ok": False, "message": f"wpctl status failed: {err_text}"}
 
-    if "card" not in out_text.lower():
-        return {"name": name, "ok": False, "message": "No playback devices listed by aplay"}
+    if "Sinks:" not in text:
+        return {"name": name, "ok": False, "message": "No audio sinks listed by wpctl"}
 
-    # Strict matching by ALSA card index (recommended for fixed hardware setup)
-    # Example line: "card 1: Device [USB Audio Device], device 0: USB Audio [USB Audio]"
-    card_pattern = re.compile(r"card\s+(\d+):\s*([^\[]+)\[([^\]]+)\]", re.IGNORECASE)
-    cards = []
-    for line in out_text.splitlines():
-        match = card_pattern.search(line)
-        if match:
-            cards.append({
-                "index": match.group(1).strip(),
-                "short": match.group(2).strip(),
-                "label": match.group(3).strip(),
-                "raw": line.strip(),
-            })
+    sinks_block = text.split("Sinks:", 1)[1].split("Sources:", 1)[0]
+    has_default_sink = "*" in sinks_block
+    if not has_default_sink:
+        return {"name": name, "ok": False, "message": "No default audio sink set"}
 
-    card_index = os.environ.get("AUDIO_CARD_INDEX", "").strip()
-    card_label = os.environ.get("AUDIO_CARD_LABEL", "").strip().lower()
-    if card_index:
-        for card in cards:
-            if card["index"] == card_index:
-                return {
-                    "name": name,
-                    "ok": True,
-                    "message": f"Configured ALSA card index detected: card {card_index} ({card['label']})",
-                }
-        detected = ", ".join(f"{c['index']}:{c['label']}" for c in cards) or "none"
-        return {
-            "name": name,
-            "ok": False,
-            "message": f"Configured AUDIO_CARD_INDEX={card_index} not found. Detected cards: {detected}",
-        }
-
-    if card_label:
-        for card in cards:
-            haystack = f"{card['short']} {card['label']} {card['raw']}".lower()
-            if card_label in haystack:
-                return {
-                    "name": name,
-                    "ok": True,
-                    "message": f"Configured ALSA card label matched: {card['label']}",
-                }
-        return {
-            "name": name,
-            "ok": False,
-            "message": f"Configured AUDIO_CARD_LABEL not found: {card_label}",
-        }
-
-    keyword = os.environ.get("AUDIO_DEVICE_KEYWORD", "").strip().lower()
-    if keyword:
-        if keyword in out_text.lower():
-            return {"name": name, "ok": True, "message": f"Configured audio device keyword matched: {keyword}"}
-        return {"name": name, "ok": False, "message": f"Audio device present but keyword not found: {keyword}"}
-
-    return {
-        "name": name,
-        "ok": False,
-        "message": "Audio interface detected, but amplifier (PAM8403) cannot be auto-verified. Set AUDIO_DEVICE_KEYWORD for strict check.",
-    }
+    return {"name": name, "ok": True, "message": "Default audio sink available (PipeWire)"}

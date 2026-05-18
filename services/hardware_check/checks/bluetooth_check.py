@@ -1,65 +1,51 @@
+from __future__ import annotations
+
 import asyncio
 import os
 import re
 import shutil
-from pathlib import Path
 
-async def check():
+
+_MAC_RE = re.compile(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
+
+
+async def check() -> dict:
     name = "bluetooth_check"
-    rfcomm_device = os.environ.get("HC05_RFCOMM_DEVICE", "/dev/rfcomm0").strip()
+    mac = os.environ.get("BLUETOOTH_MAC", "CB:7A:DB:AD:30:D9").strip()
 
-    # Preferred strict validation: HC-05 is considered detected only when bound to RFCOMM.
-    if rfcomm_device and Path(rfcomm_device).exists():
-        return {"name": name, "ok": True, "message": f"HC-05 RFCOMM port detected: {rfcomm_device}"}
-
-    # Fallback to bluetoothctl only when rfcomm port is not present.
     if not shutil.which("bluetoothctl"):
-        return {"name": name, "ok": False, "message": f"{rfcomm_device} not found and bluetoothctl not available"}
+        return {"name": name, "ok": False, "message": "bluetoothctl not available (install bluez)"}
 
-    show_proc = await asyncio.create_subprocess_exec(
+    if not mac:
+        return {"name": name, "ok": False, "message": "BLUETOOTH_MAC not configured"}
+
+    if not _MAC_RE.fullmatch(mac):
+        return {"name": name, "ok": False, "message": f"Invalid BLUETOOTH_MAC format: {mac}"}
+    mac = mac.upper()
+
+    show = await asyncio.create_subprocess_exec(
         "bluetoothctl", "show",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    out, err = await show_proc.communicate()
-    out_text = (out or b"").decode(errors="ignore")
-    err_text = (err or b"").decode(errors="ignore")
+    show_out, _ = await show.communicate()
+    if "Controller" not in (show_out or b"").decode("utf-8", errors="replace"):
+        return {"name": name, "ok": False, "message": "No Bluetooth controller detected"}
 
-    if show_proc.returncode != 0:
-        return {"name": name, "ok": False, "message": f"bluetoothctl error: {err_text.strip()}"}
-
-    if "Controller" not in out_text:
-        return {"name": name, "ok": False, "message": f"No Bluetooth controller detected and {rfcomm_device} not present"}
-
-    hc05_mac = os.environ.get("HC05_MAC", "").strip()
-    if not hc05_mac:
-        return {
-            "name": name,
-            "ok": False,
-            "message": f"Controller present, but HC05_MAC not set; {rfcomm_device} not found so HC-05 cannot be confirmed",
-        }
-
-    # Validate and normalize MAC format.
-    if not re.fullmatch(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", hc05_mac):
-        return {"name": name, "ok": False, "message": f"Invalid HC05_MAC format: {hc05_mac}"}
-    hc05_mac = hc05_mac.upper()
-
-    info_proc = await asyncio.create_subprocess_exec(
-        "bluetoothctl", "info", hc05_mac,
+    info = await asyncio.create_subprocess_exec(
+        "bluetoothctl", "info", mac,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    info_out, info_err = await info_proc.communicate()
-    info_text = (info_out or b"").decode(errors="ignore")
-    info_err_text = (info_err or b"").decode(errors="ignore")
+    info_out, info_err = await info.communicate()
+    info_text = (info_out or b"").decode("utf-8", errors="replace")
 
-    if info_proc.returncode != 0 and not info_text.strip():
-        return {"name": name, "ok": False, "message": f"HC-05 info unavailable for {hc05_mac}: {info_err_text.strip()}"}
+    if not info_text.strip():
+        err = (info_err or b"").decode("utf-8", errors="replace").strip()
+        return {"name": name, "ok": False, "message": f"BT speaker info unavailable for {mac}: {err}"}
 
-    is_connected = "Connected: yes" in info_text
-    is_paired = "Paired: yes" in info_text
-    if is_connected:
-        return {"name": name, "ok": True, "message": f"HC-05 connected ({hc05_mac})"}
-    if is_paired:
-        return {"name": name, "ok": False, "message": f"HC-05 paired but not connected ({hc05_mac})"}
-    return {"name": name, "ok": False, "message": f"HC-05 not connected ({hc05_mac})"}
+    if "Connected: yes" in info_text:
+        return {"name": name, "ok": True, "message": f"BT speaker connected ({mac})"}
+    if "Paired: yes" in info_text:
+        return {"name": name, "ok": False, "message": f"BT speaker paired but not connected ({mac})"}
+    return {"name": name, "ok": False, "message": f"BT speaker not connected ({mac})"}

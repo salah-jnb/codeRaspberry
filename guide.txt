@@ -20,7 +20,7 @@ export HC05_RFCOMM_DEVICE=/dev/rfcomm0
 // Regle BLE: DETECTED uniquement si /dev/rfcomm0 existe
 
 // Audio sortie (carte ALSA exacte)
-// verifie avec: aplay -l
+// verifie avec:                 
 export AUDIO_CARD_INDEX=1
 // optionnel: label texte si besoin
 // export AUDIO_CARD_LABEL=USB Audio Device
