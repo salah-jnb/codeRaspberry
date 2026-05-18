@@ -49,7 +49,7 @@ def _env_float(key: str, default: float) -> float:
 
 @dataclass(frozen=True)
 class BackendConfig:
-    base_url: str = "http://192.168.100.82:8765"
+    base_url: str = "http://SALAH_DESKTOP.local:8765"
     timeout_seconds: float = 60.0
     voice_name: Optional[str] = None
     extra_text: Optional[str] = None
@@ -108,7 +108,7 @@ class AppConfig:
 
 def load_config() -> AppConfig:
     backend = BackendConfig(
-        base_url=_env_str("BACKEND_URL", "http://192.168.100.82:8765"),
+        base_url=_env_str("BACKEND_URL", "http://SALAH_DESKTOP.local:8765"),
         timeout_seconds=_env_float("BACKEND_TIMEOUT", 60.0),
         voice_name=_env_optional("BACKEND_VOICE_NAME"),
         extra_text=_env_optional("BACKEND_EXTRA_TEXT"),
