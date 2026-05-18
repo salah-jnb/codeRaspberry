@@ -1,7 +1,11 @@
 // initialiser environnement
 source .venv/bin/activate
 
-//cablage ecran 
+// backend FastAPI sur le PC (meme Wi-Fi que le Pi)
+export BACKEND_URL=http://192.168.100.82:8765
+// ou dans .env : BACKEND_URL=http://192.168.100.82:8765
+
+//cablage ecran
 RX (Jaune/) -> Pin 8 (GPIO 14 - TX) du Raspberry Pi.
 
 TX (Bleu) -> Pin 10 (GPIO 15 - RX) du Raspberry Pi.
