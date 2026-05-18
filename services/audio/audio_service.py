@@ -19,5 +19,5 @@ class AudioService:
         duration = duration_seconds if duration_seconds is not None else self._default_duration
         logger.info("Recording %.1fs of audio", duration)
         wav = await self._adapter.record(duration)
-        logger.debug("Captured %d bytes of WAV", len(wav))
+        logger.info("Captured %d bytes of WAV", len(wav))
         return wav

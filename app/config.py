@@ -84,6 +84,7 @@ class ArduinoConfig:
     baudrate: int = 9600
     timeout_seconds: float = 2.0
     boot_delay_seconds: float = 2.0
+    require_ack: bool = False
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,7 @@ def load_config() -> AppConfig:
         baudrate=_env_int("ARDUINO_BAUDRATE", 9600),
         timeout_seconds=_env_float("ARDUINO_TIMEOUT", 2.0),
         boot_delay_seconds=_env_float("ARDUINO_BOOT_DELAY", 2.0),
+        require_ack=_env_str("ARDUINO_REQUIRE_ACK", "0") in {"1", "true", "yes"},
     )
     conversation = ConversationConfig(
         listen_seconds=_env_float("LISTEN_SECONDS", respeaker.record_seconds),

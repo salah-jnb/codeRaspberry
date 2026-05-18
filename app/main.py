@@ -105,6 +105,7 @@ async def run(config: AppConfig) -> None:
         baudrate=config.arduino.baudrate,
         timeout=config.arduino.timeout_seconds,
         boot_delay_seconds=config.arduino.boot_delay_seconds,
+        require_ack=config.arduino.require_ack,
     )
     respeaker = RespeakerAdapter(
         alsa_device=config.respeaker.alsa_device,

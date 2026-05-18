@@ -53,8 +53,12 @@ class ConversationService:
                 extra_text=self._extra_text,
                 voice_name=self._voice_name,
             )
-        except Exception:
-            logger.exception("Backend pipeline failed")
+        except Exception as exc:
+            detail = getattr(getattr(exc, "response", None), "text", None)
+            if detail:
+                logger.error("Backend pipeline failed: %s", detail.strip()[:500])
+            else:
+                logger.exception("Backend pipeline failed")
             await self._flash_expression(Expression.SAD)
             return
 

@@ -45,7 +45,7 @@ class BackendClient:
     async def health(self) -> bool:
         client = self._require()
         try:
-            response = await client.get("/", timeout=5.0)
+            response = await client.get("/", timeout=15.0)
             return response.status_code < 500
         except httpx.HTTPError as exc:
             logger.debug("Backend health probe failed: %s", exc)

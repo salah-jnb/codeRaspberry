@@ -41,11 +41,13 @@ class ArduinoAdapter:
         baudrate: int = 9600,
         timeout: float = 2.0,
         boot_delay_seconds: float = 2.0,
+        require_ack: bool = False,
     ) -> None:
         self._configured_port = port
         self._baudrate = baudrate
         self._timeout = timeout
         self._boot_delay = boot_delay_seconds
+        self._require_ack = require_ack
         self._serial: Optional[serial.Serial] = None
         self._active_port: Optional[str] = None
         self._lock = Lock()
@@ -75,11 +77,7 @@ class ArduinoAdapter:
                 last_error = exc
                 continue
             time.sleep(self._boot_delay)
-            try:
-                ser.reset_input_buffer()
-                ser.reset_output_buffer()
-            except SerialException:
-                pass
+            self._flush_buffers(ser)
             self._serial = ser
             self._active_port = candidate
             logger.info("Arduino opened on %s", candidate)
@@ -99,8 +97,16 @@ class ArduinoAdapter:
             self._serial = None
             self._active_port = None
 
+    @staticmethod
+    def _flush_buffers(ser: serial.Serial) -> None:
+        try:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+        except (SerialException, OSError):
+            pass
+
     def send(self, command: str | ArduinoCommand) -> str:
-        """Send a single-character command and return the Arduino ACK line."""
+        """Send a single-character command; optional ACK line if the sketch sends one."""
         if not self.is_open:
             raise RuntimeError("Arduino adapter not opened")
         token = command.value if isinstance(command, ArduinoCommand) else command
@@ -110,11 +116,13 @@ class ArduinoAdapter:
         with self._lock:
             assert self._serial is not None
             try:
-                self._serial.reset_input_buffer()
+                self._flush_buffers(self._serial)
                 self._serial.write(token.encode("ascii"))
                 self._serial.flush()
+                if not self._require_ack:
+                    return ""
                 line = self._serial.readline()
-            except SerialException as exc:
+            except (SerialException, OSError) as exc:
                 raise RuntimeError(f"Arduino I/O failed: {exc}") from exc
 
         return line.decode("ascii", errors="replace").strip()
