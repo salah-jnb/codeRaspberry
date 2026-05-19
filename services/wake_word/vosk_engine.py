@@ -110,16 +110,37 @@ class VoskWakeWordEngine:
                     len(self._matcher.keywords), self._chunk_bytes)
 
         stream = self._respeaker.stream_pcm(self._chunk_bytes)
+        chunks_seen = 0
+        nonzero_chunks = 0
+        last_logged_partial = ""
         try:
             async for chunk in stream:
                 if stop_event is not None and stop_event.is_set():
                     return None
 
+                chunks_seen += 1
+                # Cheap audio-level probe: if every byte is 0/255 across many chunks,
+                # the mic stream is dead (no signal). Useful diagnostic when nothing
+                # is being recognised at all.
+                if chunk and any(b not in (0, 0xFF) for b in chunk[:64]):
+                    nonzero_chunks += 1
+                if chunks_seen % 40 == 0:  # ~10s @ 250ms chunks
+                    logger.info(
+                        "Vosk heartbeat — %d chunks streamed, %d with audio signal "
+                        "(last partial: %r)",
+                        chunks_seen, nonzero_chunks, last_logged_partial[:80] or "<empty>",
+                    )
+
                 final = await asyncio.to_thread(recognizer.AcceptWaveform, chunk)
                 if final:
                     text = json.loads(recognizer.Result()).get("text", "")
+                    if text:
+                        logger.info("Vosk FINAL: %r", text[:200])
                 else:
                     text = json.loads(recognizer.PartialResult()).get("partial", "")
+                    if text and text != last_logged_partial:
+                        logger.info("Vosk partial: %r", text[:200])
+                        last_logged_partial = text
 
                 if not text:
                     continue
