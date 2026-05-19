@@ -93,6 +93,7 @@ class ConversationConfig:
     inter_turn_pause_seconds: float = 0.5
     play_gesture_during_speech: bool = True
     max_active_silences: int = 3
+    greeting_text: str = "أهلا بيك"
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,7 @@ def load_config() -> AppConfig:
         inter_turn_pause_seconds=_env_float("INTER_TURN_PAUSE", 0.5),
         play_gesture_during_speech=_env_str("GESTURE_DURING_SPEECH", "1") not in {"0", "false", "no"},
         max_active_silences=_env_int("MAX_ACTIVE_SILENCES", 3),
+        greeting_text=_env_str("GREETING_TEXT", "أهلا بيك"),
     )
     wake_word = WakeWordConfig(
         enabled=_env_str("WAKE_WORD_ENABLED", "1") not in {"0", "false", "no"},

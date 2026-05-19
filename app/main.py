@@ -24,6 +24,7 @@ from services.wake_word.default_keywords import DEFAULT_KEYWORDS
 from services.wake_word.wake_word_matcher import WakeWordMatcher
 from services.wake_word.wake_word_service import WakeWordService
 from utils.logger import get_logger
+from utils.states import error, state, warn
 
 try:
     from services.wake_word.vosk_engine import VoskWakeWordEngine
@@ -51,13 +52,13 @@ def _label(check_name: str) -> str:
 async def _report_hardware() -> None:
     statuses = await run_full_check()
     detected = sum(1 for s in statuses if s.get("ok"))
-    logger.info("Hardware detection report (%d/%d):", detected, len(statuses))
+    state("HW", f"{detected}/{len(statuses)} components detected")
     for status in statuses:
-        state = "DETECTED" if status.get("ok") else "MISSING "
+        glyph = "✓" if status.get("ok") else "✗"
         logger.info(
-            " - %-22s | %s | %s",
+            "    %s  %-22s — %s",
+            glyph,
             _label(status.get("name", "?")),
-            state,
             status.get("message", ""),
         )
 
@@ -65,10 +66,10 @@ async def _report_hardware() -> None:
 def _safe_open(label: str, opener: Callable[[], None]) -> bool:
     try:
         opener()
-        logger.info("%s opened", label)
+        logger.info("    ✓  %s opened", label)
         return True
     except Exception as exc:
-        logger.warning("%s unavailable: %s", label, exc)
+        warn(f"{label} unavailable: {exc}")
         return False
 
 
@@ -86,7 +87,7 @@ async def _shutdown(
     display: DisplayService,
     motion: MotionService,
 ) -> None:
-    logger.info("Shutting down KODA...")
+    state("SHUTDOWN", "stopping all adapters")
     await _safe_async("display.set_expression(SLEEPING)", display.set_expression(Expression.SLEEPING))
     if arduino.is_open:
         await _safe_async("motion.stop", motion.stop())
@@ -99,7 +100,7 @@ async def _shutdown(
         arduino.close()
     except Exception:
         logger.exception("Arduino close failed")
-    logger.info("KODA stopped")
+    state("SHUTDOWN", "stopped")
 
 
 def _build_wake_word_service(
@@ -150,25 +151,32 @@ async def _run_wake_word_loop(
     conversation: ConversationService,
     display: DisplayService,
     motion: MotionService,
+    speech: SpeechService,
     config: AppConfig,
     stop_event: asyncio.Event,
 ) -> None:
-    logger.info("KODA passive mode — waiting for wake word (keywords: %d variants)",
-                len(wake_word._matcher.keywords))
+    greeting_text = config.conversation.greeting_text or "أهلا بيك"
 
     while not stop_event.is_set():
+        state("PASSIVE", "waiting for wake word", keywords=len(wake_word._matcher.keywords))
         match = await wake_word.wait_for_wake(stop_event)
         if match is None:
             return
 
+        state("WAKE", f"keyword={match.keyword!r}")
         await _safe_async("display.set_expression(SURPRISED)",
                           display.set_expression(Expression.SURPRISED))
-        if motion._adapter.is_open if hasattr(motion, "_adapter") else False:
+        if hasattr(motion, "_adapter") and motion._adapter.is_open:
             await _safe_async("motion.hello (ack)", motion.hello())
 
         if match.remainder:
-            logger.info("Wake-word chunk also contained: %r (ignored — capturing fresh question via VAD)",
+            logger.info("    (wake-word chunk also contained %r — ignored, capturing fresh question)",
                         match.remainder)
+
+        state("GREET", f"saying {greeting_text!r}")
+        await _safe_async("speech.speak (greeting)", speech.speak(greeting_text))
+
+        state("ACTIVE", "listening for question (VAD)")
         await _safe_async("display.set_expression(THINKING)",
                           display.set_expression(Expression.THINKING))
         await conversation.listen_and_answer()
@@ -185,14 +193,15 @@ async def _run_wake_word_loop(
             except asyncio.TimeoutError:
                 pass
 
+            state("ACTIVE", f"follow-up turn ({consecutive_silences + 1}/{max_silences} silences allowed)")
             had_speech = await _run_active_turn(conversation)
             if had_speech:
                 consecutive_silences = 0
             else:
                 consecutive_silences += 1
-                logger.info("Silence %d/%d in active mode", consecutive_silences, max_silences)
+                state("SILENCE", f"{consecutive_silences}/{max_silences} consecutive silences")
 
-        logger.info("Returning to passive mode")
+        state("SLEEP", "back to wake-word watch")
         await _safe_async("display.resume_idle", display.resume_idle())
 
 
@@ -211,7 +220,7 @@ async def _run_legacy_loop(
     config: AppConfig,
     stop_event: asyncio.Event,
 ) -> None:
-    logger.info("KODA always-listening mode — wake word disabled")
+    state("ACTIVE", "always-listening mode — wake word disabled")
     while not stop_event.is_set():
         await conversation.run_turn(config.conversation.listen_seconds)
         try:
@@ -225,7 +234,7 @@ async def _run_legacy_loop(
 
 
 async def run(config: AppConfig) -> None:
-    logger.info("KODA booting (robot_id=%s, backend=%s)", config.robot_id, config.backend.base_url)
+    state("BOOT", f"robot_id={config.robot_id}", backend=config.backend.base_url)
     await _report_hardware()
 
     nextion = NextionAdapter(
@@ -257,15 +266,15 @@ async def run(config: AppConfig) -> None:
     if config.audio_output.auto_connect:
         connected = await audio_output.ensure_bluetooth()
         if connected:
-            logger.info("Bluetooth speaker ready: %s", config.audio_output.bluetooth_mac)
+            state("READY", f"Bluetooth speaker {config.audio_output.bluetooth_mac}")
         else:
-            logger.warning("Bluetooth speaker unavailable; falling back to default sink")
+            warn("Bluetooth speaker unavailable — falling back to default sink")
 
     backend = BackendClient(config.backend.base_url, config.backend.timeout_seconds)
     await backend.start()
 
     if not await backend.health():
-        logger.warning("Backend health probe failed (continuing — may recover)")
+        warn("Backend health probe failed (continuing — may recover)")
 
     display = DisplayService(nextion)
     motion = MotionService(arduino)
@@ -307,6 +316,8 @@ async def run(config: AppConfig) -> None:
     if arduino.is_open:
         await _safe_async("motion.hello (greeting)", motion.hello())
 
+    state("READY", "KODA online")
+
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -317,7 +328,7 @@ async def run(config: AppConfig) -> None:
 
     try:
         if wake_word is not None:
-            await _run_wake_word_loop(wake_word, conversation, display, motion, config, stop_event)
+            await _run_wake_word_loop(wake_word, conversation, display, motion, speech, config, stop_event)
         else:
             await _run_legacy_loop(conversation, config, stop_event)
     finally:
