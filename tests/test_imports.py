@@ -18,6 +18,9 @@ MODULES = (
     "services.motion.motion_service",
     "services.speech.speech_service",
     "services.hardware_check.hardware_check_service",
+    "services.wake_word.vosk_engine",
+    "services.wake_word.wake_word_service",
+    "scripts.download_vosk_model",
     "utils.logger",
 )
 

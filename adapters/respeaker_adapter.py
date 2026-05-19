@@ -4,6 +4,7 @@ import asyncio
 import shutil
 import tempfile
 from pathlib import Path
+from typing import AsyncIterator, Optional
 
 from utils.logger import get_logger
 
@@ -26,6 +27,14 @@ class RespeakerAdapter:
         self._sample_format = sample_format
         self._lock = asyncio.Lock()
         self._validate_tool()
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    @property
+    def channels(self) -> int:
+        return self._channels
 
     @staticmethod
     def _validate_tool() -> None:
@@ -70,3 +79,63 @@ class RespeakerAdapter:
                     tmp.unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    async def stream_pcm(self, chunk_bytes: int) -> AsyncIterator[bytes]:
+        """Yield raw S16_LE PCM chunks from a long-running arecord process.
+
+        The process is opened once and kept running until the consumer cancels
+        the generator. This avoids the open/close-per-chunk pattern that
+        triggers the ReSpeaker USB firmware disconnect at 16 kHz.
+
+        ``chunk_bytes`` controls the read granularity (250 ms @ 16 kHz mono S16
+        is 8000 bytes — a good default for a streaming recognizer).
+        """
+        if chunk_bytes <= 0:
+            raise ValueError("chunk_bytes must be positive")
+
+        await self._lock.acquire()
+        proc: Optional[asyncio.subprocess.Process] = None
+        try:
+            cmd = [
+                "arecord",
+                "-D", self._device,
+                "-f", self._sample_format,
+                "-r", str(self._sample_rate),
+                "-c", str(self._channels),
+                "-t", "raw",
+                "-q",
+            ]
+            logger.debug("arecord (stream) %s", " ".join(cmd[1:]))
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            assert proc.stdout is not None
+            while True:
+                try:
+                    data = await proc.stdout.readexactly(chunk_bytes)
+                except asyncio.IncompleteReadError as exc:
+                    if exc.partial:
+                        yield bytes(exc.partial)
+                    rc = await proc.wait()
+                    stderr = (await proc.stderr.read()).decode("utf-8", errors="replace") if proc.stderr else ""
+                    raise RuntimeError(
+                        f"arecord stream ended unexpectedly (code {rc}): {stderr.strip()}"
+                    ) from exc
+                if not data:
+                    break
+                yield data
+        finally:
+            if proc is not None and proc.returncode is None:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+            try:
+                self._lock.release()
+            except RuntimeError:
+                pass

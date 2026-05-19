@@ -101,6 +101,19 @@ class WakeWordConfig:
     keywords: tuple[str, ...] = ()
     chunk_seconds: float = 2.0
     cooldown_seconds: float = 0.1
+    # When True, also fetch dynamic name variants from the backend at boot.
+    fetch_variants_from_backend: bool = False
+
+
+@dataclass(frozen=True)
+class VoskConfig:
+    # Set to "" to fall back to the legacy Azure-STT chunk wake-word path.
+    language: str = "ar"
+    models_dir: str = "models/vosk"
+    # Bytes per audio chunk fed to the recognizer (~250ms at 16k/16-bit/mono).
+    chunk_bytes: int = 8000
+    # Auto-download the model on first boot if it is missing locally.
+    auto_download: bool = True
 
 
 @dataclass(frozen=True)
@@ -123,6 +136,7 @@ class AppConfig:
     arduino: ArduinoConfig = field(default_factory=ArduinoConfig)
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     wake_word: WakeWordConfig = field(default_factory=WakeWordConfig)
+    vosk: VoskConfig = field(default_factory=VoskConfig)
     listener: ListenerConfigEntry = field(default_factory=ListenerConfigEntry)
 
 
@@ -168,6 +182,13 @@ def load_config() -> AppConfig:
         keywords=_parse_keywords(_env_optional("WAKE_WORD_KEYWORDS")),
         chunk_seconds=_env_float("WAKE_WORD_CHUNK_SECONDS", 2.0),
         cooldown_seconds=_env_float("WAKE_WORD_COOLDOWN", 0.1),
+        fetch_variants_from_backend=_env_str("WAKE_WORD_FETCH_VARIANTS", "0") in {"1", "true", "yes"},
+    )
+    vosk = VoskConfig(
+        language=_env_str("VOSK_LANGUAGE", "ar"),
+        models_dir=_env_str("VOSK_MODELS_DIR", "models/vosk"),
+        chunk_bytes=_env_int("VOSK_CHUNK_BYTES", 8000),
+        auto_download=_env_str("VOSK_AUTO_DOWNLOAD", "1") not in {"0", "false", "no"},
     )
     listener = ListenerConfigEntry(
         max_seconds=_env_float("LISTENER_MAX_SECONDS", 15.0),
@@ -186,6 +207,7 @@ def load_config() -> AppConfig:
         arduino=arduino,
         conversation=conversation,
         wake_word=wake_word,
+        vosk=vosk,
         listener=listener,
     )
 

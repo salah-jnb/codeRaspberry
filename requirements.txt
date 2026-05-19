@@ -7,6 +7,9 @@ pyserial>=3.5
 # Config loading
 python-dotenv>=1.0
 
+# Wake-word detection (offline streaming STT)
+vosk>=0.3.45
+
 # Tests
 pytest>=8.0
 pytest-asyncio>=0.23

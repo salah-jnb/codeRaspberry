@@ -12,7 +12,20 @@ logger = get_logger(__name__)
 
 
 class WakeWordService:
-    """Passive listening loop: record short chunks, STT them, match the keyword."""
+    """Passive wake-word listener.
+
+    Has two operating modes:
+
+    * **Streaming engine** (preferred) — a :class:`VoskWakeWordEngine` (or any
+      object exposing ``async wait_for_wake(stop_event)``) consumes a continuous
+      mic stream locally. Latency <300 ms and no Azure calls until the wake
+      word fires.
+    * **Legacy chunk fallback** — when no engine is injected, fall back to the
+      original "record 2 s → POST to Azure STT → string match" loop. Kept so
+      the Pi can still boot when Vosk is unavailable, but it is markedly less
+      reliable (chunk boundaries can split the keyword; see ``main.py`` log
+      "Wake-word chunk also contained …").
+    """
 
     def __init__(
         self,
@@ -22,12 +35,14 @@ class WakeWordService:
         *,
         chunk_seconds: float = 2.0,
         cooldown_seconds: float = 0.1,
+        engine=None,
     ) -> None:
         self._audio = audio
         self._backend = backend
         self._matcher = matcher
         self._chunk_seconds = max(1.0, chunk_seconds)
         self._cooldown = max(0.0, cooldown_seconds)
+        self._engine = engine
         self._stopped = asyncio.Event()
 
     def stop(self) -> None:
@@ -36,14 +51,19 @@ class WakeWordService:
     def reset(self) -> None:
         self._stopped = asyncio.Event()
 
-    async def wait_for_wake(self, stop_event: Optional[asyncio.Event] = None) -> Optional[WakeMatch]:
-        """Loop until the wake word is heard or the stop event is set.
+    async def prepare(self) -> None:
+        if self._engine is not None and hasattr(self._engine, "prepare"):
+            await self._engine.prepare()
 
-        Returns the WakeMatch on detection, or None when stopped before any hit.
-        """
-        external_stop = stop_event
+    async def wait_for_wake(self, stop_event: Optional[asyncio.Event] = None) -> Optional[WakeMatch]:
+        if self._engine is not None:
+            return await self._engine.wait_for_wake(stop_event)
+        return await self._wait_for_wake_legacy(stop_event)
+
+    async def _wait_for_wake_legacy(self, stop_event: Optional[asyncio.Event]) -> Optional[WakeMatch]:
+        """Original chunked Azure-STT path; only used when no engine is injected."""
         while True:
-            if external_stop is not None and external_stop.is_set():
+            if stop_event is not None and stop_event.is_set():
                 return None
             if self._stopped.is_set():
                 return None
@@ -68,7 +88,8 @@ class WakeWordService:
             logger.info("Heard: %r", text[:120])
             match = self._matcher.match(text)
             if match.matched:
-                logger.info("Wake word detected (keyword=%s) — remainder=%r", match.keyword, match.remainder)
+                logger.info("Wake word detected (keyword=%s) — remainder=%r",
+                            match.keyword, match.remainder)
                 return match
 
             if self._cooldown:

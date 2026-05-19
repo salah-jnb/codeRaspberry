@@ -25,6 +25,11 @@ from services.wake_word.wake_word_matcher import WakeWordMatcher
 from services.wake_word.wake_word_service import WakeWordService
 from utils.logger import get_logger
 
+try:
+    from services.wake_word.vosk_engine import VoskWakeWordEngine
+except Exception:  # pragma: no cover — vosk not installed during early dev
+    VoskWakeWordEngine = None  # type: ignore[assignment]
+
 logger = get_logger(__name__)
 
 
@@ -101,17 +106,42 @@ def _build_wake_word_service(
     config: AppConfig,
     audio: AudioService,
     backend: BackendClient,
+    respeaker: RespeakerAdapter,
 ) -> Optional[WakeWordService]:
     if not config.wake_word.enabled:
         return None
     keywords = config.wake_word.keywords or DEFAULT_KEYWORDS
     matcher = WakeWordMatcher(list(keywords))
+
+    engine = None
+    if config.vosk.language and VoskWakeWordEngine is not None:
+        try:
+            engine = VoskWakeWordEngine(
+                respeaker=respeaker,
+                matcher=matcher,
+                language=config.vosk.language,
+                models_dir=config.vosk.models_dir,
+                chunk_bytes=config.vosk.chunk_bytes,
+                auto_download=config.vosk.auto_download,
+            )
+            logger.info("Wake-word engine: Vosk streaming (language=%s)", config.vosk.language)
+        except Exception:
+            logger.exception("Failed to construct Vosk engine; falling back to legacy chunk mode")
+            engine = None
+    else:
+        logger.warning(
+            "Vosk wake-word engine unavailable (language=%r, vosk_installed=%s) — "
+            "using legacy chunked Azure-STT loop (less reliable)",
+            config.vosk.language, VoskWakeWordEngine is not None,
+        )
+
     return WakeWordService(
         audio=audio,
         backend=backend,
         matcher=matcher,
         chunk_seconds=config.wake_word.chunk_seconds,
         cooldown_seconds=config.wake_word.cooldown_seconds,
+        engine=engine,
     )
 
 
@@ -137,12 +167,11 @@ async def _run_wake_word_loop(
             await _safe_async("motion.hello (ack)", motion.hello())
 
         if match.remainder:
-            logger.info("Wake-word followed by text: %r", match.remainder)
-            await conversation.handle_text_question(match.remainder)
-        else:
-            await _safe_async("display.set_expression(THINKING)",
-                              display.set_expression(Expression.THINKING))
-            await conversation.listen_and_answer()
+            logger.info("Wake-word chunk also contained: %r (ignored — capturing fresh question via VAD)",
+                        match.remainder)
+        await _safe_async("display.set_expression(THINKING)",
+                          display.set_expression(Expression.THINKING))
+        await conversation.listen_and_answer()
 
         consecutive_silences = 0
         max_silences = max(0, config.conversation.max_active_silences)
@@ -266,7 +295,12 @@ async def run(config: AppConfig) -> None:
         listener=listener,
     )
 
-    wake_word = _build_wake_word_service(config, audio, backend)
+    wake_word = _build_wake_word_service(config, audio, backend, respeaker)
+    if wake_word is not None:
+        try:
+            await wake_word.prepare()
+        except Exception:
+            logger.exception("Wake-word engine prepare() failed; continuing — engine may self-heal")
 
     if nextion.is_open:
         await display.resume_idle()

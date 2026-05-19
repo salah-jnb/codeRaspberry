@@ -1,0 +1,5 @@
+# Vosk model directories are heavy (40MB-1GB+) — never commit them.
+# The download script will populate this directory at runtime.
+*
+!.gitignore
+!README.md
