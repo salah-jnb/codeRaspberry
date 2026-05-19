@@ -50,15 +50,15 @@ class WakeWordService:
 
             try:
                 wav = await self._audio.record(self._chunk_seconds)
-            except Exception:
-                logger.exception("Wake-word chunk recording failed; retrying")
+            except Exception as exc:
+                logger.warning("Wake-word chunk recording failed: %s — retrying", exc)
                 await asyncio.sleep(1.0)
                 continue
 
             try:
                 text = await self._backend.speech_to_text(wav)
-            except Exception:
-                logger.exception("Wake-word STT call failed; retrying")
+            except Exception as exc:
+                logger.warning("Wake-word STT failed: %s — retrying", exc)
                 await asyncio.sleep(1.0)
                 continue
 
