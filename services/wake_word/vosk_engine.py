@@ -11,8 +11,10 @@ deferred to keep tests and CI fast on machines without the wheel installed.
 """
 from __future__ import annotations
 
+import array
 import asyncio
 import json
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +23,22 @@ from services.wake_word.wake_word_matcher import WakeMatch, WakeWordMatcher
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _rms_s16le(pcm: bytes) -> int:
+    """Root-mean-square amplitude of a signed-16-bit little-endian PCM chunk."""
+    if not pcm:
+        return 0
+    # `array('h', pcm)` interprets the bytes as native short ints. On Linux/Pi
+    # native is little-endian which matches S16_LE.
+    samples = array.array("h")
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    if not samples:
+        return 0
+    total = 0
+    for s in samples:
+        total += s * s
+    return int(math.sqrt(total / len(samples)))
 
 
 def _resolve_model_dir(language: str, models_dir: str) -> Path:
@@ -111,7 +129,8 @@ class VoskWakeWordEngine:
 
         stream = self._respeaker.stream_pcm(self._chunk_bytes)
         chunks_seen = 0
-        nonzero_chunks = 0
+        rms_sum = 0.0
+        rms_peak = 0
         last_logged_partial = ""
         try:
             async for chunk in stream:
@@ -119,17 +138,27 @@ class VoskWakeWordEngine:
                     return None
 
                 chunks_seen += 1
-                # Cheap audio-level probe: if every byte is 0/255 across many chunks,
-                # the mic stream is dead (no signal). Useful diagnostic when nothing
-                # is being recognised at all.
-                if chunk and any(b not in (0, 0xFF) for b in chunk[:64]):
-                    nonzero_chunks += 1
+                # Compute real RMS amplitude on the S16_LE PCM payload.
+                # Speech at normal volume typically sits in [800, 5000].
+                # < ~150 = effective silence or broken capture; > ~10000 = clipping.
+                rms = _rms_s16le(chunk)
+                rms_sum += rms
+                if rms > rms_peak:
+                    rms_peak = rms
                 if chunks_seen % 40 == 0:  # ~10s @ 250ms chunks
-                    logger.info(
-                        "Vosk heartbeat — %d chunks streamed, %d with audio signal "
-                        "(last partial: %r)",
-                        chunks_seen, nonzero_chunks, last_logged_partial[:80] or "<empty>",
+                    avg = rms_sum / 40
+                    quality = (
+                        "SILENT (mic broken or muted)" if rms_peak < 150 else
+                        "very quiet — speak louder or check mic gain" if rms_peak < 600 else
+                        "OK"
                     )
+                    logger.info(
+                        "Vosk heartbeat — %d chunks, RMS avg=%d peak=%d [%s] | last partial=%r",
+                        chunks_seen, int(avg), rms_peak, quality,
+                        last_logged_partial[:80] or "<empty>",
+                    )
+                    rms_sum = 0.0
+                    rms_peak = 0
 
                 final = await asyncio.to_thread(recognizer.AcceptWaveform, chunk)
                 if final:
