@@ -62,8 +62,15 @@ class BackendClient:
 
     async def speech_to_text(self, wav_bytes: bytes) -> str:
         client = self._require()
+        logger.info("→ POST /api/audio/speech-to-text  wav=%d bytes", len(wav_bytes))
         files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
         response = await client.post("/api/audio/speech-to-text", files=files)
+        logger.info(
+            "← STT response status=%d type=%s body=%s",
+            response.status_code,
+            response.headers.get("content-type", "?"),
+            response.text[:300],
+        )
         response.raise_for_status()
         data = response.json()
         if isinstance(data, dict):
@@ -84,16 +91,39 @@ class BackendClient:
             data["extra_text"] = extra_text
         if voice_name:
             data["voice_name"] = voice_name
+        logger.info(
+            "→ POST /api/audio/speech-to-n8n-to-speech  wav=%d bytes  form=%s",
+            len(wav_bytes), data or "{}",
+        )
         response = await client.post(
             "/api/audio/speech-to-n8n-to-speech",
             files=files,
             data=data,
         )
+        if response.status_code >= 400:
+            logger.error(
+                "← pipeline error  status=%d  body=%s",
+                response.status_code, response.text[:500],
+            )
+        else:
+            logger.info(
+                "← pipeline OK  status=%d  type=%s  size=%d bytes",
+                response.status_code,
+                response.headers.get("content-type", "?"),
+                len(response.content),
+            )
         response.raise_for_status()
         return response.content
 
     async def trigger_n8n(self, message: str) -> dict:
         client = self._require()
+        logger.info("→ POST /api/trigger-n8n  message=%r", message[:300])
         response = await client.post("/api/trigger-n8n", json={"message": message})
+        logger.info(
+            "← n8n response status=%d type=%s body=%s",
+            response.status_code,
+            response.headers.get("content-type", "?"),
+            response.text[:500],
+        )
         response.raise_for_status()
         return response.json()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Optional
 
 from adapters.backend_client import BackendClient
@@ -12,6 +13,9 @@ from services.speech.speech_service import SpeechService
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_DEBUG_CAPTURE_WAV = Path("/tmp/koda_last_capture.wav")
+_DEBUG_REPLY_WAV = Path("/tmp/koda_last_reply.wav")
 
 
 class ConversationService:
@@ -103,7 +107,35 @@ class ConversationService:
             await self._display.resume_idle()
 
     async def _process_audio(self, wav_in: bytes) -> None:
+        try:
+            _DEBUG_CAPTURE_WAV.write_bytes(wav_in)
+        except OSError as exc:
+            logger.debug("Could not save debug capture WAV: %s", exc)
+        logger.info(
+            "📥 Captured %d bytes (saved to %s)  extra_text=%r  voice=%r",
+            len(wav_in), _DEBUG_CAPTURE_WAV, self._extra_text, self._voice_name,
+        )
+
         await self._display.set_expression(Expression.THINKING)
+
+        try:
+            transcript = await self._backend.speech_to_text(wav_in)
+        except Exception as exc:
+            detail = getattr(getattr(exc, "response", None), "text", None)
+            logger.error("STT pre-check failed: %s", (detail or str(exc))[:500])
+            transcript = ""
+
+        transcript = (transcript or "").strip()
+        if transcript:
+            logger.info("📝 Heard: %r", transcript[:300])
+        else:
+            logger.warning(
+                "📝 STT returned empty transcript — aborting pipeline (audio at %s)",
+                _DEBUG_CAPTURE_WAV,
+            )
+            await self._flash_expression(Expression.SAD)
+            return
+
         try:
             wav_out = await self._backend.speech_to_n8n_to_speech(
                 wav_in,
@@ -118,6 +150,15 @@ class ConversationService:
                 logger.exception("Backend pipeline failed")
             await self._flash_expression(Expression.SAD)
             return
+
+        try:
+            _DEBUG_REPLY_WAV.write_bytes(wav_out)
+        except OSError as exc:
+            logger.debug("Could not save debug reply WAV: %s", exc)
+        logger.info(
+            "📤 Received reply WAV: %d bytes (saved to %s)",
+            len(wav_out), _DEBUG_REPLY_WAV,
+        )
 
         await self._display.set_expression(Expression.SINGING)
         try:
