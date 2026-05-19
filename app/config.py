@@ -66,7 +66,7 @@ class RespeakerConfig:
 
 @dataclass(frozen=True)
 class AudioOutputConfig:
-    bluetooth_mac: Optional[str] = "CB:7A:DB:AD:30:D9"
+    bluetooth_mac: Optional[str] = "AD:1C:99:E7:9B:78"
     pulse_sink: Optional[str] = None
     auto_connect: bool = True
 
@@ -141,7 +141,7 @@ def load_config() -> AppConfig:
         sample_format=_env_str("RESPEAKER_SAMPLE_FORMAT", "S16_LE"),
     )
     audio_output = AudioOutputConfig(
-        bluetooth_mac=_env_optional("BLUETOOTH_MAC") or "CB:7A:DB:AD:30:D9",
+        bluetooth_mac=_env_optional("BLUETOOTH_MAC") or "AD:1C:99:E7:9B:78",
         pulse_sink=_env_optional("PULSE_SINK"),
         auto_connect=_env_str("BLUETOOTH_AUTO_CONNECT", "1") not in {"0", "false", "no"},
     )

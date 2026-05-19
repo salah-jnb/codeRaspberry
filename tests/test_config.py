@@ -6,13 +6,20 @@ import os
 import pytest
 
 
+_PREFIXES = (
+    "BACKEND_", "RESPEAKER_", "BLUETOOTH_", "NEXTION_", "ARDUINO_",
+    "LISTEN_", "INTER_TURN_", "GESTURE_", "WAKE_WORD_", "LISTENER_",
+    "MAX_ACTIVE_", "ROBOT_ID", "LOG_LEVEL", "PULSE_SINK",
+)
+
+
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     for key in list(os.environ):
-        if key.startswith(("BACKEND_", "RESPEAKER_", "BLUETOOTH_", "NEXTION_",
-                           "ARDUINO_", "LISTEN_", "INTER_TURN_", "GESTURE_",
-                           "ROBOT_ID", "LOG_LEVEL", "PULSE_SINK")):
+        if key.startswith(_PREFIXES):
             monkeypatch.delenv(key, raising=False)
+    # Neutralize load_dotenv during reload so .env on disk does not leak into the test.
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *args, **kwargs: False)
     yield
 
 
@@ -28,7 +35,9 @@ def test_defaults_are_sane():
     assert config.respeaker.alsa_device == "plughw:3,0"
     assert config.respeaker.sample_rate == 16000
     assert config.nextion.port == "/dev/serial0"
-    assert config.audio_output.bluetooth_mac == "CB:7A:DB:AD:30:D9"
+    assert config.audio_output.bluetooth_mac == "AD:1C:99:E7:9B:78"
+    assert config.wake_word.enabled is True
+    assert config.listener.silence_duration_seconds == 1.5
 
 
 def test_env_override(monkeypatch):
@@ -37,6 +46,8 @@ def test_env_override(monkeypatch):
     monkeypatch.setenv("RESPEAKER_SAMPLE_RATE", "48000")
     monkeypatch.setenv("BLUETOOTH_AUTO_CONNECT", "0")
     monkeypatch.setenv("ARDUINO_PORT", "/dev/ttyACM0")
+    monkeypatch.setenv("WAKE_WORD_ENABLED", "0")
+    monkeypatch.setenv("WAKE_WORD_KEYWORDS", "koda, مرحبا , hey ")
 
     config = _reload_config().load_config()
     assert config.robot_id == "koda-02"
@@ -44,3 +55,5 @@ def test_env_override(monkeypatch):
     assert config.respeaker.sample_rate == 48000
     assert config.audio_output.auto_connect is False
     assert config.arduino.port == "/dev/ttyACM0"
+    assert config.wake_word.enabled is False
+    assert config.wake_word.keywords == ("koda", "مرحبا", "hey")
