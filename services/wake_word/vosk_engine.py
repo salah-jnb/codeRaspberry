@@ -200,5 +200,7 @@ class VoskWakeWordEngine:
             # and the RespeakerAdapter lock is released before
             # ContinuousListenerService.listen() tries to spawn its own
             # `sox -t alsa` reader.
+            logger.info("Closing Vosk audio stream...")
             await stream.aclose()
+            logger.info("Vosk audio stream closed (mic lock released)")
         return None

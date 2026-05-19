@@ -131,10 +131,16 @@ class RespeakerAdapter:
             if proc is not None and proc.returncode is None:
                 proc.terminate()
                 try:
-                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
                 except asyncio.TimeoutError:
                     proc.kill()
-                    await proc.wait()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "arecord refused to die after SIGKILL — leaking subprocess pid=%s",
+                            proc.pid,
+                        )
             try:
                 self._lock.release()
             except RuntimeError:

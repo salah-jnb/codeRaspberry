@@ -160,6 +160,7 @@ async def _run_wake_word_loop(
     while not stop_event.is_set():
         state("PASSIVE", "waiting for wake word", keywords=len(wake_word._matcher.keywords))
         match = await wake_word.wait_for_wake(stop_event)
+        logger.info("[debug] main: wake_word.wait_for_wake returned match=%r", match)
         if match is None:
             return
 
