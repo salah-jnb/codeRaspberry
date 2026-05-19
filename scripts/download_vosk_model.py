@@ -16,7 +16,8 @@ import argparse
 import logging
 import shutil
 import sys
-import tempfile
+import time
+import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -38,6 +39,13 @@ class ModelSpec:
     archive_root: str
     approx_size_mb: int
     notes: str = ""
+
+    @property
+    def required_disk_mb(self) -> int:
+        # Peak during install = zip (~approx_size_mb) + extracted tree (~2x zip)
+        # + a little headroom. Better to over-estimate and fail upfront than
+        # hit OSError 28 mid-extraction.
+        return int(self.approx_size_mb * 3 + 100)
 
 
 MODEL_REGISTRY: dict[str, ModelSpec] = {
@@ -118,23 +126,131 @@ def _looks_valid(model_dir: Path) -> bool:
     return all((model_dir / sub).is_dir() for sub in _REQUIRED_DIRS)
 
 
-def _download(url: str, dest: Path) -> None:
-    logger.info("Downloading %s", url)
+_BLOCK_SIZE = 64 * 1024
+_PROGRESS_INTERVAL_BYTES = 4 * 1024 * 1024  # log every 4 MB
+_MAX_DOWNLOAD_ATTEMPTS = 6
+_INITIAL_BACKOFF_S = 2.0
+_MAX_BACKOFF_S = 30.0
+_TIMEOUT_S = 60.0
+_TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
+    ConnectionResetError,
+    ConnectionAbortedError,
+    ConnectionError,
+    TimeoutError,
+    urllib.error.URLError,
+    OSError,
+)
 
-    def _progress(blocks: int, block_size: int, total_size: int) -> None:
-        if total_size <= 0:
-            return
-        downloaded = blocks * block_size
-        pct = min(100.0, 100.0 * downloaded / total_size)
-        if blocks % 100 == 0 or downloaded >= total_size:
+
+def _probe_total_size(url: str) -> int:
+    """Return the remote Content-Length, or ``0`` if the server does not advertise it."""
+    req = urllib.request.Request(url, method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
+            value = resp.headers.get("Content-Length")
+            return int(value) if value and value.isdigit() else 0
+    except _TRANSIENT_ERRORS:
+        return 0
+
+
+def _download(url: str, dest: Path) -> None:
+    """Download ``url`` to ``dest`` with HTTP Range resume + retry/backoff.
+
+    ``dest`` is preserved between attempts so a connection drop on byte N
+    resumes from byte N rather than restarting from zero. Once the file size
+    matches the remote ``Content-Length`` the download is considered complete.
+    """
+    logger.info("Downloading %s", url)
+    total_size = _probe_total_size(url)
+    backoff = _INITIAL_BACKOFF_S
+
+    for attempt in range(1, _MAX_DOWNLOAD_ATTEMPTS + 1):
+        downloaded = dest.stat().st_size if dest.exists() else 0
+        if total_size and downloaded >= total_size:
+            logger.info("Already fully downloaded (%d bytes); skipping fetch.", downloaded)
             sys.stderr.write(
-                f"\r  {pct:5.1f}%  ({downloaded // 1024 // 1024} MB / {total_size // 1024 // 1024} MB)"
+                f"\r  100.0%  ({downloaded // 1024 // 1024} MB / {total_size // 1024 // 1024} MB)\n"
             )
             sys.stderr.flush()
+            return
 
-    urllib.request.urlretrieve(url, dest, reporthook=_progress)
-    sys.stderr.write("\n")
-    sys.stderr.flush()
+        headers: dict[str, str] = {}
+        open_mode = "wb"
+        if downloaded > 0:
+            headers["Range"] = f"bytes={downloaded}-"
+            logger.info(
+                "Attempt %d/%d — resuming at %d MB / %s MB",
+                attempt, _MAX_DOWNLOAD_ATTEMPTS,
+                downloaded // 1024 // 1024,
+                (total_size // 1024 // 1024) if total_size else "?",
+            )
+
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
+                status = getattr(resp, "status", None) or resp.getcode()
+                # If we asked for a Range and the server replied 206 → resume.
+                # If we asked for a Range but got 200 → server ignored Range,
+                # so we must restart from zero in 'wb' mode.
+                if downloaded > 0 and status == 206:
+                    open_mode = "ab"
+                else:
+                    if downloaded > 0:
+                        logger.info("Server did not honor Range; restarting from 0.")
+                    open_mode = "wb"
+                    downloaded = 0
+
+                last_log = 0
+                with dest.open(open_mode) as fp:
+                    while True:
+                        chunk = resp.read(_BLOCK_SIZE)
+                        if not chunk:
+                            break
+                        fp.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0 and downloaded - last_log >= _PROGRESS_INTERVAL_BYTES:
+                            pct = min(100.0, 100.0 * downloaded / total_size)
+                            sys.stderr.write(
+                                f"\r  {pct:5.1f}%  "
+                                f"({downloaded // 1024 // 1024} MB / {total_size // 1024 // 1024} MB)"
+                            )
+                            sys.stderr.flush()
+                            last_log = downloaded
+
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+
+            if total_size and downloaded < total_size:
+                raise RuntimeError(
+                    f"Short read: got {downloaded} / {total_size} bytes — connection likely truncated"
+                )
+            return
+
+        except _TRANSIENT_ERRORS as exc:
+            if attempt >= _MAX_DOWNLOAD_ATTEMPTS:
+                logger.error(
+                    "Download failed after %d attempts: %s (partial file kept at %s for next run)",
+                    attempt, exc, dest,
+                )
+                raise
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+            logger.warning(
+                "Network error on attempt %d/%d (%s) — sleeping %.1fs then resuming",
+                attempt, _MAX_DOWNLOAD_ATTEMPTS, exc, backoff,
+            )
+            time.sleep(backoff)
+            backoff = min(backoff * 2, _MAX_BACKOFF_S)
+        except RuntimeError as exc:
+            # Short-read truncation: also retry within budget.
+            if attempt >= _MAX_DOWNLOAD_ATTEMPTS:
+                raise
+            logger.warning(
+                "Truncated download on attempt %d/%d (%s) — sleeping %.1fs then resuming",
+                attempt, _MAX_DOWNLOAD_ATTEMPTS, exc, backoff,
+            )
+            time.sleep(backoff)
+            backoff = min(backoff * 2, _MAX_BACKOFF_S)
 
 
 def _extract(archive: Path, work_dir: Path) -> Path:
@@ -153,7 +269,13 @@ def ensure_model(
     *,
     force: bool = False,
 ) -> Path:
-    """Return the local path of the Vosk model for ``language``; download if needed."""
+    """Return the local path of the Vosk model for ``language``; download if needed.
+
+    The downloaded archive is kept in ``<models_dir>/.partial/<code>.zip`` between
+    attempts so a Ctrl-C / SIGTERM / connection drop / power-off does not erase
+    progress — re-running the script resumes from the byte where the previous
+    attempt died.
+    """
     spec = MODEL_REGISTRY.get(language)
     if spec is None:
         supported = ", ".join(sorted(MODEL_REGISTRY))
@@ -162,30 +284,63 @@ def ensure_model(
             "Add a new entry in scripts/download_vosk_model.py MODEL_REGISTRY."
         )
 
-    target_dir = (models_dir or DEFAULT_MODELS_DIR) / spec.code
+    base_dir = models_dir or DEFAULT_MODELS_DIR
+    target_dir = base_dir / spec.code
+    partial_dir = base_dir / ".partial"
+    archive = partial_dir / f"{spec.code}.zip"
+
     if not force and target_dir.is_dir() and _looks_valid(target_dir):
         logger.debug("Vosk model already present at %s", target_dir)
         return target_dir
+
+    if force and archive.exists():
+        logger.info("--force: discarding partial archive at %s", archive)
+        archive.unlink()
 
     if target_dir.exists():
         logger.info("Removing incomplete or stale model at %s", target_dir)
         shutil.rmtree(target_dir)
 
     target_dir.parent.mkdir(parents=True, exist_ok=True)
-    logger.info("Installing Vosk model for %s (≈%d MB)…", spec.code, spec.approx_size_mb)
+    partial_dir.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix=f"vosk_{spec.code}_") as tmp:
-        tmp_path = Path(tmp)
-        archive = tmp_path / "model.zip"
-        _download(spec.url, archive)
-        extracted_root = _extract(archive, tmp_path)
+    free_mb = shutil.disk_usage(partial_dir).free // 1024 // 1024
+    if free_mb < spec.required_disk_mb:
+        raise RuntimeError(
+            f"Not enough disk space to install model {spec.code!r}: "
+            f"{free_mb} MB free at {partial_dir}, need ≈{spec.required_disk_mb} MB "
+            f"(zip {spec.approx_size_mb} MB + extraction ~2x + headroom). "
+            "Free space (sudo apt clean, remove old logs/snaps) or move models_dir to a larger volume."
+        )
+    logger.info(
+        "Installing Vosk model for %s (≈%d MB, %d MB free at %s)…",
+        spec.code, spec.approx_size_mb, free_mb, partial_dir,
+    )
+
+    _download(spec.url, archive)
+
+    extract_dir = partial_dir / f"{spec.code}_extract"
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir)
+    extract_dir.mkdir(parents=True)
+    try:
+        extracted_root = _extract(archive, extract_dir)
         shutil.move(str(extracted_root), str(target_dir))
+    finally:
+        if extract_dir.exists():
+            shutil.rmtree(extract_dir, ignore_errors=True)
 
     if not _looks_valid(target_dir):
         raise RuntimeError(
             f"Downloaded model at {target_dir} is missing required folders "
             f"({', '.join(_REQUIRED_DIRS)})."
         )
+
+    # Successful install — partial archive is no longer needed.
+    try:
+        archive.unlink(missing_ok=True)
+    except OSError:
+        pass
 
     logger.info("Vosk model installed at %s", target_dir)
     return target_dir
