@@ -92,6 +92,24 @@ class ConversationConfig:
     listen_seconds: float = 5.0
     inter_turn_pause_seconds: float = 0.5
     play_gesture_during_speech: bool = True
+    max_active_silences: int = 3
+
+
+@dataclass(frozen=True)
+class WakeWordConfig:
+    enabled: bool = True
+    keywords: tuple[str, ...] = ()
+    chunk_seconds: float = 2.0
+    cooldown_seconds: float = 0.1
+
+
+@dataclass(frozen=True)
+class ListenerConfigEntry:
+    max_seconds: float = 15.0
+    silence_duration_seconds: float = 1.5
+    silence_threshold_pct: float = 1.0
+    start_threshold_pct: float = 1.0
+    min_speech_seconds: float = 0.2
 
 
 @dataclass(frozen=True)
@@ -104,6 +122,8 @@ class AppConfig:
     nextion: NextionConfig = field(default_factory=NextionConfig)
     arduino: ArduinoConfig = field(default_factory=ArduinoConfig)
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
+    wake_word: WakeWordConfig = field(default_factory=WakeWordConfig)
+    listener: ListenerConfigEntry = field(default_factory=ListenerConfigEntry)
 
 
 def load_config() -> AppConfig:
@@ -141,6 +161,20 @@ def load_config() -> AppConfig:
         listen_seconds=_env_float("LISTEN_SECONDS", respeaker.record_seconds),
         inter_turn_pause_seconds=_env_float("INTER_TURN_PAUSE", 0.5),
         play_gesture_during_speech=_env_str("GESTURE_DURING_SPEECH", "1") not in {"0", "false", "no"},
+        max_active_silences=_env_int("MAX_ACTIVE_SILENCES", 3),
+    )
+    wake_word = WakeWordConfig(
+        enabled=_env_str("WAKE_WORD_ENABLED", "1") not in {"0", "false", "no"},
+        keywords=_parse_keywords(_env_optional("WAKE_WORD_KEYWORDS")),
+        chunk_seconds=_env_float("WAKE_WORD_CHUNK_SECONDS", 2.0),
+        cooldown_seconds=_env_float("WAKE_WORD_COOLDOWN", 0.1),
+    )
+    listener = ListenerConfigEntry(
+        max_seconds=_env_float("LISTENER_MAX_SECONDS", 15.0),
+        silence_duration_seconds=_env_float("LISTENER_SILENCE_DURATION", 1.5),
+        silence_threshold_pct=_env_float("LISTENER_SILENCE_THRESHOLD_PCT", 1.0),
+        start_threshold_pct=_env_float("LISTENER_START_THRESHOLD_PCT", 1.0),
+        min_speech_seconds=_env_float("LISTENER_MIN_SPEECH_SECONDS", 0.2),
     )
     return AppConfig(
         robot_id=_env_str("ROBOT_ID", "koda-01"),
@@ -151,4 +185,13 @@ def load_config() -> AppConfig:
         nextion=nextion,
         arduino=arduino,
         conversation=conversation,
+        wake_word=wake_word,
+        listener=listener,
     )
+
+
+def _parse_keywords(raw: Optional[str]) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    parts = [chunk.strip() for chunk in raw.split(",")]
+    return tuple(p for p in parts if p)
