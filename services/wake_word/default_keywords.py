@@ -19,6 +19,9 @@ DEFAULT_KEYWORDS: tuple[str, ...] = (
     "محسنه", "محسنة", "مهسنه",
     # Arabic — spaced (STT splitting tokens)
     "مح سن", "م حسن",
+    # Arabic — initial م dropped by STT (frequent: Vosk hears "حسين"/"حسن"/"حسان")
+    "حسين", "حسن", "حسان", "حسنين",
+    "هسين", "هسن",
     # Latin — main transliterations
     "mohsen", "mohcen", "mohseen", "mohceen", "mohsin",
     "muhsen", "muhsin", "muhcen",
