@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+from dataclasses import dataclass
 from typing import Optional
 
 import httpx
@@ -7,6 +9,41 @@ import httpx
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class ActionResult:
+    """Structured response from POST /api/audio/speech-to-action.
+
+    `action` drives what the conversation service does next:
+      - "text"   : just play `audio_wav` (TTS of the assistant reply)
+      - "music"  : play `audio_wav` (announcement) THEN download `music_url` and play it
+      - "motion" : play `audio_wav` (acknowledgment) THEN send `motion_command` to Arduino
+      - "sleep"  : play `audio_wav` then transition robot to passive/sleep mode
+      - "error"  : backend or n8n failed — `spoken_text` carries the error message
+    """
+
+    action: str
+    input_text: str
+    spoken_text: str
+    audio_wav: bytes
+    music_url: Optional[str] = None
+    music_title: Optional[str] = None
+    motion_command: Optional[str] = None
+
+    @classmethod
+    def from_json(cls, payload: dict) -> "ActionResult":
+        audio_b64 = payload.get("audio_b64") or ""
+        audio_wav = base64.b64decode(audio_b64) if audio_b64 else b""
+        return cls(
+            action=str(payload.get("action") or "text"),
+            input_text=str(payload.get("input_text") or ""),
+            spoken_text=str(payload.get("spoken_text") or ""),
+            audio_wav=audio_wav,
+            music_url=payload.get("music_url") or None,
+            music_title=payload.get("music_title") or None,
+            motion_command=payload.get("motion_command") or None,
+        )
 
 
 class BackendClient:
@@ -114,6 +151,48 @@ class BackendClient:
             )
         response.raise_for_status()
         return response.content
+
+    async def speech_to_action(
+        self,
+        wav_bytes: bytes,
+        *,
+        extra_text: Optional[str] = None,
+        voice_name: Optional[str] = None,
+    ) -> ActionResult:
+        """Multi-type pipeline — preferred over speech_to_n8n_to_speech for full action support."""
+        client = self._require()
+        files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
+        data: dict[str, str] = {}
+        if extra_text:
+            data["extra_text"] = extra_text
+        if voice_name:
+            data["voice_name"] = voice_name
+        logger.info(
+            "→ POST /api/audio/speech-to-action  wav=%d bytes  form=%s",
+            len(wav_bytes), data or "{}",
+        )
+        response = await client.post(
+            "/api/audio/speech-to-action",
+            files=files,
+            data=data,
+        )
+        if response.status_code >= 400:
+            logger.error(
+                "← action pipeline error  status=%d  body=%s",
+                response.status_code, response.text[:500],
+            )
+        response.raise_for_status()
+        payload = response.json()
+        result = ActionResult.from_json(payload)
+        logger.info(
+            "← action=%s  input=%r  command=%r  url=%r  audio=%d bytes",
+            result.action,
+            result.input_text[:120],
+            result.motion_command,
+            result.music_url,
+            len(result.audio_wav),
+        )
+        return result
 
     async def trigger_n8n(self, message: str) -> dict:
         client = self._require()

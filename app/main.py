@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 from adapters.arduino_adapter import ArduinoAdapter
@@ -11,6 +12,7 @@ from adapters.nextion_adapter import NextionAdapter
 from adapters.respeaker_adapter import RespeakerAdapter
 from app.config import AppConfig, load_config
 from services.audio.audio_service import AudioService
+from services.audio.music_player import MusicPlayer
 from services.conversation.conversation_service import ConversationService
 from services.display.display_service import DisplayService, Expression
 from services.hardware_check.hardware_check_service import run_full_check
@@ -293,6 +295,10 @@ async def run(config: AppConfig) -> None:
         ),
     )
 
+    music_cache_dir = Path("cache/music").resolve()
+    music_player = MusicPlayer(audio_output, music_cache_dir)
+    logger.info("MusicPlayer ready (cache dir=%s)", music_cache_dir)
+
     conversation = ConversationService(
         audio=audio,
         display=display,
@@ -303,6 +309,7 @@ async def run(config: AppConfig) -> None:
         extra_text=config.backend.extra_text,
         gesture_during_speech=config.conversation.play_gesture_during_speech,
         listener=listener,
+        music_player=music_player,
     )
 
     wake_word = _build_wake_word_service(config, audio, backend, respeaker)

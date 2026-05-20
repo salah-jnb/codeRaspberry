@@ -4,10 +4,12 @@ import asyncio
 from pathlib import Path
 from typing import Optional
 
-from adapters.backend_client import BackendClient
+from adapters.backend_client import ActionResult, BackendClient
 from services.audio.audio_service import AudioService
+from services.audio.music_player import MusicPlayer
 from services.display.display_service import DisplayService, Expression
 from services.listener.continuous_listener_service import ContinuousListenerService
+from services.motion.motion_dispatcher import MotionDispatcher
 from services.motion.motion_service import MotionService
 from services.speech.speech_service import SpeechService
 from utils.logger import get_logger
@@ -33,6 +35,8 @@ class ConversationService:
         extra_text: Optional[str] = None,
         gesture_during_speech: bool = True,
         listener: Optional[ContinuousListenerService] = None,
+        music_player: Optional[MusicPlayer] = None,
+        motion_dispatcher: Optional[MotionDispatcher] = None,
     ) -> None:
         self._audio = audio
         self._display = display
@@ -43,6 +47,8 @@ class ConversationService:
         self._extra_text = extra_text
         self._gesture_during_speech = gesture_during_speech
         self._listener = listener
+        self._music_player = music_player
+        self._motion_dispatcher = motion_dispatcher or MotionDispatcher(motion)
 
     async def run_turn(self, listen_seconds: Optional[float] = None) -> None:
         """Record (fixed duration) → speech-to-n8n-to-speech → playback."""
@@ -119,25 +125,7 @@ class ConversationService:
         await self._display.set_expression(Expression.THINKING)
 
         try:
-            transcript = await self._backend.speech_to_text(wav_in)
-        except Exception as exc:
-            detail = getattr(getattr(exc, "response", None), "text", None)
-            logger.error("STT pre-check failed: %s", (detail or str(exc))[:500])
-            transcript = ""
-
-        transcript = (transcript or "").strip()
-        if transcript:
-            logger.info("📝 Heard: %r", transcript[:300])
-        else:
-            logger.warning(
-                "📝 STT returned empty transcript — aborting pipeline (audio at %s)",
-                _DEBUG_CAPTURE_WAV,
-            )
-            await self._flash_expression(Expression.SAD)
-            return
-
-        try:
-            wav_out = await self._backend.speech_to_n8n_to_speech(
+            result = await self._backend.speech_to_action(
                 wav_in,
                 extra_text=self._extra_text,
                 voice_name=self._voice_name,
@@ -145,30 +133,93 @@ class ConversationService:
         except Exception as exc:
             detail = getattr(getattr(exc, "response", None), "text", None)
             if detail:
-                logger.error("Backend pipeline failed: %s", detail.strip()[:500])
+                logger.error("Backend action pipeline failed: %s", detail.strip()[:500])
             else:
-                logger.exception("Backend pipeline failed")
+                logger.exception("Backend action pipeline failed")
             await self._flash_expression(Expression.SAD)
             return
 
+        if result.input_text:
+            logger.info("📝 Heard: %r", result.input_text[:300])
+
         try:
-            _DEBUG_REPLY_WAV.write_bytes(wav_out)
+            if result.audio_wav:
+                _DEBUG_REPLY_WAV.write_bytes(result.audio_wav)
         except OSError as exc:
             logger.debug("Could not save debug reply WAV: %s", exc)
+
+        await self._dispatch_action(result)
+
+    async def _dispatch_action(self, result: ActionResult) -> None:
+        """Execute the action returned by the backend: text / music / motion / sleep / error."""
+        action = (result.action or "text").lower()
         logger.info(
-            "📤 Received reply WAV: %d bytes (saved to %s)",
-            len(wav_out), _DEBUG_REPLY_WAV,
+            "🎬 Dispatching action=%s  spoken=%r  command=%r  url=%r",
+            action,
+            result.spoken_text[:120] if result.spoken_text else "",
+            result.motion_command,
+            result.music_url,
         )
 
-        await self._display.set_expression(Expression.SINGING)
         try:
-            await self._play_wav_with_optional_gesture(wav_out)
+            if action == "music":
+                await self._handle_music_action(result)
+            elif action == "motion":
+                await self._handle_motion_action(result)
+            elif action == "sleep":
+                await self._handle_sleep_action(result)
+            elif action == "error":
+                logger.error("Backend reported error action: %r", result.spoken_text)
+                await self._flash_expression(Expression.SAD)
+            else:
+                # Default = "text" → just play the reply WAV (existing behavior).
+                await self._handle_text_action(result)
         except Exception:
-            logger.exception("Playback failed")
+            logger.exception("Action dispatch failed (action=%s)", action)
             await self._flash_expression(Expression.SAD)
-            return
         finally:
             await self._display.resume_idle()
+
+    async def _handle_text_action(self, result: ActionResult) -> None:
+        if not result.audio_wav:
+            logger.warning("text action with no audio WAV — nothing to play")
+            return
+        await self._display.set_expression(Expression.SINGING)
+        await self._play_wav_with_optional_gesture(result.audio_wav)
+
+    async def _handle_music_action(self, result: ActionResult) -> None:
+        if self._music_player is None:
+            logger.error("Music action requested but no MusicPlayer was wired in")
+            await self._flash_expression(Expression.SAD)
+            return
+        if not result.music_url:
+            logger.warning("Music action with empty url — ignoring")
+            return
+
+        # 1. TTS announcement first (so the user hears "I'm playing X" before download wait).
+        if result.audio_wav:
+            await self._display.set_expression(Expression.SINGING)
+            await self._speech.play_wav(result.audio_wav)
+
+        # 2. Download (if not cached) + play. The MusicPlayer is responsible for caching.
+        await self._display.set_expression(Expression.SINGING)
+        await self._music_player.play_from_url(result.music_url, title=result.music_title)
+
+    async def _handle_motion_action(self, result: ActionResult) -> None:
+        # Announce first so the user gets feedback even while motors spin up.
+        if result.audio_wav:
+            await self._display.set_expression(Expression.SINGING)
+            await self._speech.play_wav(result.audio_wav)
+        await self._motion_dispatcher.execute(result.motion_command)
+
+    async def _handle_sleep_action(self, result: ActionResult) -> None:
+        # Play the goodbye line then drop the face back to idle. The caller
+        # (main loop) handles re-entering passive mode after this returns.
+        if result.audio_wav:
+            await self._display.set_expression(Expression.SINGING)
+            await self._speech.play_wav(result.audio_wav)
+        await self._display.set_expression(Expression.SLEEPING)
+        await asyncio.sleep(0.5)
 
     async def _play_wav_with_optional_gesture(self, wav: bytes) -> None:
         if not self._gesture_during_speech:
