@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import shutil
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
+
+import httpx
 
 from adapters.audio_output_adapter import AudioOutputAdapter
 from utils.logger import get_logger
@@ -13,23 +15,29 @@ logger = get_logger(__name__)
 
 
 class MusicPlayer:
-    """Download YouTube (or other yt-dlp-supported) audio and play it on the robot speaker.
+    """Download a music WAV (served by the backend) and play it on the robot speaker.
 
-    Cached WAV files live under `cache_dir/<sha1_of_url>.wav` so repeated requests
-    for the same song skip the download entirely. The cache is bounded by
-    `max_cache_files` (LRU eviction by atime) to avoid filling the SD card.
+    Architecture: the backend on the PC runs yt-dlp (the Pi at e.g. ISET WiFi often
+    has no public Internet), produces a cached `.wav`, and exposes it at a LAN URL.
+    The Pi receives that URL via the `/api/audio/speech-to-action` response and
+    just does an HTTP GET → cache locally → play via the existing audio output.
+
+    The local cache here is a small bonus (e.g. for "rejoue la dernière chanson"
+    follow-ups). It's keyed off the LAN URL path; same URL → same file.
     """
 
     def __init__(
         self,
         output: AudioOutputAdapter,
         cache_dir: Path,
+        backend_base_url: str,
         *,
         max_cache_files: int = 25,
-        download_timeout_seconds: float = 90.0,
+        download_timeout_seconds: float = 60.0,
     ) -> None:
         self._output = output
         self._cache_dir = cache_dir
+        self._backend_base_url = backend_base_url.rstrip("/")
         self._max_cache_files = max_cache_files
         self._download_timeout = download_timeout_seconds
         self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -39,78 +47,66 @@ class MusicPlayer:
         digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
         return self._cache_dir / f"{digest}.wav"
 
+    def _resolve_url(self, url: str) -> str:
+        """Absolute URLs are kept; backend-relative URLs (`/cache/music/...`) get the
+        backend base prefix so we don't depend on the Pi resolving the backend host
+        the same way for every request."""
+        parsed = urlparse(url)
+        if parsed.scheme in ("http", "https"):
+            return url
+        if url.startswith("/"):
+            return f"{self._backend_base_url}{url}"
+        return f"{self._backend_base_url}/{url}"
+
     async def play_from_url(self, url: str, *, title: Optional[str] = None) -> None:
         if not url or not str(url).strip():
             raise ValueError("MusicPlayer.play_from_url called with empty url")
-        url = str(url).strip()
+        resolved = self._resolve_url(str(url).strip())
+        cache_path = self._cache_path_for(resolved)
 
-        if not shutil.which("yt-dlp"):
-            raise RuntimeError(
-                "yt-dlp not installed on this Pi. Install with: sudo apt install yt-dlp ffmpeg"
-            )
-
-        cache_path = self._cache_path_for(url)
         if cache_path.exists() and cache_path.stat().st_size > 0:
-            logger.info("🎵 Music cache hit: %s (%r)", cache_path.name, title or url)
+            logger.info("🎵 Music cache hit: %s (%r)", cache_path.name, title or resolved)
         else:
             async with self._download_lock:
-                # Re-check after acquiring the lock in case another caller filled it.
                 if not (cache_path.exists() and cache_path.stat().st_size > 0):
-                    logger.info("🎵 Downloading audio: %r → %s", title or url, cache_path.name)
-                    await self._download(url, cache_path)
+                    logger.info("🎵 Fetching audio: %r → %s", title or resolved, cache_path.name)
+                    await self._fetch(resolved, cache_path)
                     self._evict_old_files()
 
-        # Touch the file so LRU eviction keeps frequently-played tracks alive.
         try:
             cache_path.touch()
         except OSError:
             pass
-
         await self._output.play_wav_file(cache_path)
 
-    async def _download(self, url: str, dest_wav: Path) -> None:
-        # yt-dlp will append `.wav` to the template — pass it without extension.
-        out_template = str(dest_wav.with_suffix("")) + ".%(ext)s"
-        cmd = [
-            "yt-dlp",
-            "--quiet",
-            "--no-warnings",
-            "--no-playlist",
-            "--extract-audio",
-            "--audio-format", "wav",
-            "--audio-quality", "0",
-            "-o", out_template,
-            url,
-        ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
+    async def _fetch(self, url: str, dest_wav: Path) -> None:
+        tmp_path = dest_wav.with_suffix(".part")
         try:
-            _, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=self._download_timeout
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise RuntimeError(
-                f"yt-dlp download timed out after {self._download_timeout:.0f}s for {url!r}"
-            )
-        if proc.returncode != 0:
-            err = (stderr or b"").decode("utf-8", errors="replace").strip()
-            raise RuntimeError(f"yt-dlp failed (code {proc.returncode}): {err[:500]}")
-        if not dest_wav.exists() or dest_wav.stat().st_size == 0:
-            raise RuntimeError(
-                f"yt-dlp returned success but cache file {dest_wav} is missing/empty"
-            )
+            async with httpx.AsyncClient(timeout=self._download_timeout) as client:
+                async with client.stream("GET", url) as response:
+                    if response.status_code != 200:
+                        body_preview = (await response.aread()).decode("utf-8", "replace")[:200]
+                        raise RuntimeError(
+                            f"Music fetch failed: HTTP {response.status_code} from {url} — {body_preview}"
+                        )
+                    with tmp_path.open("wb") as f:
+                        async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                            f.write(chunk)
+            if tmp_path.stat().st_size == 0:
+                raise RuntimeError(f"Backend returned empty music payload for {url}")
+            tmp_path.replace(dest_wav)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
 
     def _evict_old_files(self) -> None:
         files = sorted(
             (p for p in self._cache_dir.glob("*.wav") if p.is_file()),
             key=lambda p: p.stat().st_atime,
         )
-        # Keep the N most-recently-used files; drop the rest.
         for path in files[: max(0, len(files) - self._max_cache_files)]:
             try:
                 path.unlink()

@@ -296,8 +296,8 @@ async def run(config: AppConfig) -> None:
     )
 
     music_cache_dir = Path("cache/music").resolve()
-    music_player = MusicPlayer(audio_output, music_cache_dir)
-    logger.info("MusicPlayer ready (cache dir=%s)", music_cache_dir)
+    music_player = MusicPlayer(audio_output, music_cache_dir, config.backend.base_url)
+    logger.info("MusicPlayer ready (cache dir=%s, backend=%s)", music_cache_dir, config.backend.base_url)
 
     conversation = ConversationService(
         audio=audio,
