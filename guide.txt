@@ -2,8 +2,9 @@
 source .venv/bin/activate
 python -m app.main
 // backend FastAPI sur le PC (meme Wi-Fi que le Pi)
-export BACKEND_URL=http://192.168.100.82:8765
-// ou dans .env : BACKEND_URL=http://192.168.100.82:8765
+// IP Wi-Fi du PC (verifie avec ipconfig) — ex. 192.168.69.185
+export BACKEND_URL=http://192.168.69.185:8765
+// ou nom mDNS si le Pi le resout : BACKEND_URL=http://SALAH_DESKTOP.local:8765
 
 //cablage ecran
 RX (Jaune/) -> Pin 8 (GPIO 14 - TX) du Raspberry Pi.
@@ -29,5 +30,7 @@ export AUDIO_CARD_INDEX=1
 // optionnel: label texte si besoin
 // export AUDIO_CARD_LABEL=USB Audio Device
 
-// lancer diagnostic
-python -m app.main
+
+
+
+sudo nmcli connection up aa

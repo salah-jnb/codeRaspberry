@@ -12,6 +12,7 @@ from adapters.nextion_adapter import NextionAdapter
 from adapters.respeaker_adapter import RespeakerAdapter
 from app.config import AppConfig, load_config
 from services.audio.audio_service import AudioService
+from services.audio.doa_reader import DOAReader
 from services.audio.music_player import MusicPlayer
 from services.conversation.conversation_service import ConversationService
 from services.display.display_service import DisplayService, Expression
@@ -20,7 +21,11 @@ from services.listener.continuous_listener_service import (
     ContinuousListenerService,
     ListenerConfig,
 )
-from services.motion.motion_service import MotionService
+from services.motion.motion_service import (
+    MotionService,
+    RotationCalibration,
+    shortest_signed_angle,
+)
 from services.speech.speech_service import SpeechService
 from services.wake_word.default_keywords import DEFAULT_KEYWORDS
 from services.wake_word.wake_word_matcher import WakeWordMatcher
@@ -156,6 +161,7 @@ async def _run_wake_word_loop(
     speech: SpeechService,
     config: AppConfig,
     stop_event: asyncio.Event,
+    doa_reader: Optional[DOAReader] = None,
 ) -> None:
     greeting_text = config.conversation.greeting_text or "أهلا بيك"
 
@@ -169,6 +175,25 @@ async def _run_wake_word_loop(
         state("WAKE", f"keyword={match.keyword!r}")
         await _safe_async("display.set_expression(SURPRISED)",
                           display.set_expression(Expression.SURPRISED))
+
+        # Rotate toward the speaker BEFORE greeting, so the robot is already
+        # facing them when "أهلا بيك" starts. The ReSpeaker XMOS DOA register
+        # is refreshed while the wake word was still being uttered, so this
+        # angle is the most recent voice direction.
+        if doa_reader is not None and doa_reader.available and config.rotation.enabled:
+            raw_angle = doa_reader.read_angle()
+            if raw_angle is not None:
+                signed = shortest_signed_angle(raw_angle, motion._rotation)
+                logger.info(
+                    "🧭 DOA raw=%d°  → relative=%+.1f° (front_offset=%.1f°, invert=%s)",
+                    raw_angle, signed,
+                    motion._rotation.front_offset_deg, motion._rotation.invert_direction,
+                )
+                if motion._adapter.is_open:
+                    await _safe_async("motion.rotate_by_angle", motion.rotate_by_angle(signed))
+            else:
+                logger.debug("DOA read returned None — skipping rotation")
+
         if hasattr(motion, "_adapter") and motion._adapter.is_open:
             await _safe_async("motion.hello (ack)", motion.hello())
 
@@ -280,8 +305,33 @@ async def run(config: AppConfig) -> None:
         warn("Backend health probe failed (continuing — may recover)")
 
     display = DisplayService(nextion)
-    motion = MotionService(arduino)
+    rotation_calib = RotationCalibration(
+        slope_deg_per_s=config.rotation.slope_deg_per_s,
+        offset_deg=config.rotation.offset_deg,
+        min_duration_s=config.rotation.min_duration_s,
+        settle_s=config.rotation.settle_s,
+        deadband_deg=config.rotation.deadband_deg,
+        front_offset_deg=config.rotation.front_offset_deg,
+        invert_direction=config.rotation.invert_direction,
+        lut=list(config.rotation.lut),
+    )
+    motion = MotionService(arduino, rotation_calib)
     audio = AudioService(respeaker, config.respeaker.record_seconds)
+
+    doa_reader = DOAReader()
+    if config.rotation.enabled:
+        if doa_reader.start():
+            logger.info(
+                "Rotation auto vers le locuteur activée (slope=%.1f°/s, offset=%.1f°, "
+                "front=%.1f°, invert=%s, LUT=%d points)",
+                rotation_calib.slope_deg_per_s, rotation_calib.offset_deg,
+                rotation_calib.front_offset_deg, rotation_calib.invert_direction,
+                len(rotation_calib.lut),
+            )
+        else:
+            logger.warning("DOA reader unavailable — rotation toward speaker disabled")
+    else:
+        logger.info("Rotation auto désactivée (ROTATION_ENABLED=0)")
     speech = SpeechService(backend, audio_output, config.backend.voice_name)
 
     listener = ContinuousListenerService(
@@ -336,7 +386,7 @@ async def run(config: AppConfig) -> None:
 
     try:
         if wake_word is not None:
-            await _run_wake_word_loop(wake_word, conversation, display, motion, speech, config, stop_event)
+            await _run_wake_word_loop(wake_word, conversation, display, motion, speech, config, stop_event, doa_reader)
         else:
             await _run_legacy_loop(conversation, config, stop_event)
     finally:

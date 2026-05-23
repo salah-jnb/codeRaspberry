@@ -127,6 +127,28 @@ class ListenerConfigEntry:
 
 
 @dataclass(frozen=True)
+class RotationConfig:
+    """Open-loop rotation toward the speaker (DOA → motor pulse)."""
+    enabled: bool = True
+    # Linear timing model (used when `lut` is empty).
+    slope_deg_per_s: float = 60.0
+    offset_deg: float = 3.3
+    min_duration_s: float = 0.05
+    settle_s: float = 0.4
+    deadband_deg: float = 5.0
+    # ReSpeaker calibration:
+    #   front_offset_deg = raw DOA value reported when a speaker is exactly in front
+    #   invert_direction = True if mic 0° points backwards in your physical build
+    front_offset_deg: float = 0.0
+    invert_direction: bool = False
+    # Optional lookup table: pairs "angle:duration" separated by commas, e.g.
+    #   ROTATION_LUT=30:0.5,60:0.95,90:1.4,135:2.0,180:2.7
+    # When set, this overrides the linear formula above (much more precise once
+    # measured properly on the actual chassis + battery).
+    lut: tuple[tuple[float, float], ...] = ()
+
+
+@dataclass(frozen=True)
 class AppConfig:
     robot_id: str = "koda-01"
     log_level: str = "INFO"
@@ -139,6 +161,7 @@ class AppConfig:
     wake_word: WakeWordConfig = field(default_factory=WakeWordConfig)
     vosk: VoskConfig = field(default_factory=VoskConfig)
     listener: ListenerConfigEntry = field(default_factory=ListenerConfigEntry)
+    rotation: RotationConfig = field(default_factory=RotationConfig)
 
 
 def load_config() -> AppConfig:
@@ -199,6 +222,17 @@ def load_config() -> AppConfig:
         start_threshold_pct=_env_float("LISTENER_START_THRESHOLD_PCT", 1.0),
         min_speech_seconds=_env_float("LISTENER_MIN_SPEECH_SECONDS", 0.2),
     )
+    rotation = RotationConfig(
+        enabled=_env_str("ROTATION_ENABLED", "1") not in {"0", "false", "no"},
+        slope_deg_per_s=_env_float("ROTATION_SLOPE_DEG_PER_S", 60.0),
+        offset_deg=_env_float("ROTATION_OFFSET_DEG", 3.3),
+        min_duration_s=_env_float("ROTATION_MIN_DURATION_S", 0.05),
+        settle_s=_env_float("ROTATION_SETTLE_S", 0.4),
+        deadband_deg=_env_float("ROTATION_DEADBAND_DEG", 5.0),
+        front_offset_deg=_env_float("ROTATION_FRONT_OFFSET_DEG", 0.0),
+        invert_direction=_env_str("ROTATION_INVERT_DIRECTION", "0") in {"1", "true", "yes"},
+        lut=_parse_rotation_lut(_env_optional("ROTATION_LUT")),
+    )
     return AppConfig(
         robot_id=_env_str("ROBOT_ID", "koda-01"),
         log_level=_env_str("LOG_LEVEL", "INFO"),
@@ -211,7 +245,24 @@ def load_config() -> AppConfig:
         wake_word=wake_word,
         vosk=vosk,
         listener=listener,
+        rotation=rotation,
     )
+
+
+def _parse_rotation_lut(raw: Optional[str]) -> tuple[tuple[float, float], ...]:
+    """Parse "30:0.5,60:0.95,90:1.4" into ((30,0.5),(60,0.95),(90,1.4))."""
+    if not raw or not raw.strip():
+        return ()
+    pairs: list[tuple[float, float]] = []
+    for chunk in raw.split(","):
+        if ":" not in chunk:
+            continue
+        angle_str, duration_str = chunk.split(":", 1)
+        try:
+            pairs.append((float(angle_str.strip()), float(duration_str.strip())))
+        except ValueError:
+            continue
+    return tuple(sorted(pairs))
 
 
 def _parse_keywords(raw: Optional[str]) -> tuple[str, ...]:
