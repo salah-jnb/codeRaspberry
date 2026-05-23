@@ -153,6 +153,56 @@ def _build_wake_word_service(
     )
 
 
+async def _rotate_toward_speaker(
+    doa_reader: Optional[DOAReader],
+    motion: MotionService,
+    config: AppConfig,
+    *,
+    label: str,
+    wait_for_voice_s: float,
+) -> None:
+    """Read the DOA and pivot the chassis toward the current speaker.
+
+    `wait_for_voice_s` controls how long we poll the XMOS voice-activity bit
+    before falling back to the latest DOA snapshot:
+      - **0.0** for the wake-word case — the angle is already fresh (the user
+        just said the wake word, the XMOS register holds that direction).
+      - **2–3s** for follow-up turns — the user may have moved silently
+        between questions; we wait for the next utterance to read the angle
+        at the right moment.
+    """
+    if doa_reader is None or not doa_reader.available or not config.rotation.enabled:
+        return
+    if not motion._adapter.is_open:
+        return
+
+    raw_angle = None
+    source = "snapshot"
+    if wait_for_voice_s > 0:
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + wait_for_voice_s
+        while loop.time() < deadline:
+            if doa_reader.voice_active():
+                raw_angle = doa_reader.read_angle()
+                if raw_angle is not None:
+                    source = "voice"
+                    break
+            await asyncio.sleep(0.1)
+    if raw_angle is None:
+        raw_angle = doa_reader.read_angle()
+    if raw_angle is None:
+        logger.debug("DOA read returned None — skipping rotation (%s)", label)
+        return
+
+    signed = shortest_signed_angle(raw_angle, motion._rotation)
+    logger.info(
+        "🧭 DOA toward %s [%s]: raw=%d°  →  relative=%+.1f° (front=%.1f°, invert=%s)",
+        label, source, raw_angle, signed,
+        motion._rotation.front_offset_deg, motion._rotation.invert_direction,
+    )
+    await _safe_async(f"motion.rotate_by_angle({label})", motion.rotate_by_angle(signed))
+
+
 async def _run_wake_word_loop(
     wake_word: WakeWordService,
     conversation: ConversationService,
@@ -176,23 +226,11 @@ async def _run_wake_word_loop(
         await _safe_async("display.set_expression(SURPRISED)",
                           display.set_expression(Expression.SURPRISED))
 
-        # Rotate toward the speaker BEFORE greeting, so the robot is already
-        # facing them when "أهلا بيك" starts. The ReSpeaker XMOS DOA register
-        # is refreshed while the wake word was still being uttered, so this
-        # angle is the most recent voice direction.
-        if doa_reader is not None and doa_reader.available and config.rotation.enabled:
-            raw_angle = doa_reader.read_angle()
-            if raw_angle is not None:
-                signed = shortest_signed_angle(raw_angle, motion._rotation)
-                logger.info(
-                    "🧭 DOA raw=%d°  → relative=%+.1f° (front_offset=%.1f°, invert=%s)",
-                    raw_angle, signed,
-                    motion._rotation.front_offset_deg, motion._rotation.invert_direction,
-                )
-                if motion._adapter.is_open:
-                    await _safe_async("motion.rotate_by_angle", motion.rotate_by_angle(signed))
-            else:
-                logger.debug("DOA read returned None — skipping rotation")
+        # Rotate immediately on the wake-word DOA snapshot (it's fresh — the user
+        # just spoke the keyword).
+        await _rotate_toward_speaker(
+            doa_reader, motion, config, label="wake-word", wait_for_voice_s=0.0,
+        )
 
         if hasattr(motion, "_adapter") and motion._adapter.is_open:
             await _safe_async("motion.hello (ack)", motion.hello())
@@ -203,6 +241,12 @@ async def _run_wake_word_loop(
 
         state("GREET", f"saying {greeting_text!r}")
         await _safe_async("speech.speak (greeting)", speech.speak(greeting_text))
+
+        # The greeting takes ~1.5s; the user might have shifted, so re-orient
+        # before the first question by waiting briefly for their next utterance.
+        await _rotate_toward_speaker(
+            doa_reader, motion, config, label="first-question", wait_for_voice_s=2.5,
+        )
 
         state("ACTIVE", "listening for question (VAD)")
         await _safe_async("display.set_expression(THINKING)",
@@ -222,6 +266,13 @@ async def _run_wake_word_loop(
                 pass
 
             state("ACTIVE", f"follow-up turn ({consecutive_silences + 1}/{max_silences} silences allowed)")
+            # Re-orient the chassis toward the speaker before each follow-up:
+            # the user may have moved silently between turns. We poll the XMOS
+            # voice-activity bit briefly so we rotate at the moment they start
+            # speaking, not based on a stale angle from the previous question.
+            await _rotate_toward_speaker(
+                doa_reader, motion, config, label="follow-up", wait_for_voice_s=2.5,
+            )
             had_speech = await _run_active_turn(conversation)
             if had_speech:
                 consecutive_silences = 0
