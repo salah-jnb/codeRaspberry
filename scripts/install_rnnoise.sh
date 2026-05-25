@@ -21,12 +21,9 @@ fi
 
 ARCH="$(uname -m)"
 case "$ARCH" in
-    aarch64) RELEASE_SUFFIX="aarch64" ;;
-    x86_64)  RELEASE_SUFFIX="x86_64"  ;;
+    aarch64|x86_64) ;;
     armv7l)
-        echo "⚠️  ARMv7 (32-bit Pi OS) — no prebuilt binary." >&2
-        echo "    Reflash to 64-bit Pi OS Bookworm or build librnnoise_ladspa.so manually." >&2
-        exit 2
+        echo "⚠️  ARMv7 (32-bit Pi OS) — build will work but is slower." >&2
         ;;
     *) echo "Unsupported architecture: $ARCH" >&2; exit 2 ;;
 esac
@@ -41,11 +38,13 @@ if [[ -z "$TARGET_HOME" || ! -d "$TARGET_HOME" ]]; then
 fi
 echo "→ Installing for user: $TARGET_USER (home: $TARGET_HOME)"
 
-apt-get update -qq
-apt-get install -y --no-install-recommends curl tar pipewire-audio pipewire-alsa wireplumber || true
+apt-get install -y --no-install-recommends \
+    git cmake build-essential autoconf libtool pkg-config \
+    pipewire-audio pipewire-alsa wireplumber || true
 
 # ----------------------------------------------------------------------
-# 2. Download librnnoise_ladspa.so (werman/noise-suppression-for-voice)
+# 2. Build librnnoise_ladspa.so from source (werman/noise-suppression-for-voice).
+#    No prebuilt aarch64 binaries are published, but the build is small (~3-5 min on Pi 4).
 # ----------------------------------------------------------------------
 LADSPA_DIR=/usr/lib/ladspa
 SO_PATH="$LADSPA_DIR/librnnoise_ladspa.so"
@@ -53,24 +52,27 @@ SO_PATH="$LADSPA_DIR/librnnoise_ladspa.so"
 mkdir -p "$LADSPA_DIR"
 
 if [[ -f "$SO_PATH" ]]; then
-    echo "→ librnnoise_ladspa.so already present at $SO_PATH"
+    echo "→ librnnoise_ladspa.so already present at $SO_PATH (skipping build)"
 else
-    REL_URL="https://github.com/werman/noise-suppression-for-voice/releases/latest/download/linux-rnnoise-ladspa-${RELEASE_SUFFIX}.tar.gz"
-    echo "→ Downloading $REL_URL"
-    TMP=$(mktemp -d)
-    pushd "$TMP" > /dev/null
-    curl -fsSL "$REL_URL" -o rnnoise.tgz
-    tar xzf rnnoise.tgz
-    # Archive layout: linux-rnnoise-ladspa/librnnoise_ladspa.so
+    BUILD_DIR=$(mktemp -d)
+    echo "→ Cloning werman/noise-suppression-for-voice → $BUILD_DIR"
+    git clone --depth=1 --recurse-submodules \
+        https://github.com/werman/noise-suppression-for-voice.git "$BUILD_DIR/src"
+    pushd "$BUILD_DIR/src" > /dev/null
+    mkdir -p build && cd build
+    echo "→ Running cmake…"
+    cmake -DCMAKE_BUILD_TYPE=Release ..
+    echo "→ Compiling (this takes 3-5 minutes on a Pi 4)…"
+    make -j"$(nproc)"
     FOUND=$(find . -name "librnnoise_ladspa.so" | head -n1)
     if [[ -z "$FOUND" ]]; then
-        echo "ERROR: librnnoise_ladspa.so not found in archive." >&2
+        echo "ERROR: build produced no librnnoise_ladspa.so" >&2
         exit 3
     fi
     install -m 0644 "$FOUND" "$SO_PATH"
     popd > /dev/null
-    rm -rf "$TMP"
-    echo "→ Installed $SO_PATH"
+    rm -rf "$BUILD_DIR"
+    echo "→ Installed $SO_PATH ($(stat -c%s "$SO_PATH") bytes)"
 fi
 
 # ----------------------------------------------------------------------
