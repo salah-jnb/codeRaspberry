@@ -194,6 +194,34 @@ class BackendClient:
         )
         return result
 
+    async def identify_face(self, jpg_bytes: bytes) -> str:
+        """POST a JPEG to /api/identify-face and return the matched name.
+
+        Returns "inconnu" on any error so the conversation never blocks because
+        the camera or backend hiccupped.
+        """
+        if not jpg_bytes:
+            return "inconnu"
+        client = self._require()
+        files = {"file": ("capture.jpg", jpg_bytes, "image/jpeg")}
+        try:
+            response = await client.post("/api/identify-face", files=files, timeout=15.0)
+        except httpx.HTTPError as exc:
+            logger.warning("identify_face network error: %s", exc)
+            return "inconnu"
+        if response.status_code != 200:
+            logger.warning(
+                "identify_face HTTP %d: %s",
+                response.status_code, response.text[:200],
+            )
+            return "inconnu"
+        try:
+            body = response.json()
+        except ValueError:
+            return "inconnu"
+        name = (body.get("nom") if isinstance(body, dict) else None) or "inconnu"
+        return str(name).strip() or "inconnu"
+
     async def trigger_n8n(self, message: str) -> dict:
         client = self._require()
         logger.info("→ POST /api/trigger-n8n  message=%r", message[:300])

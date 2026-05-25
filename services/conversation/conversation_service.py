@@ -12,6 +12,7 @@ from services.listener.continuous_listener_service import ContinuousListenerServ
 from services.motion.motion_dispatcher import MotionDispatcher
 from services.motion.motion_service import MotionService
 from services.speech.speech_service import SpeechService
+from services.vision.face_recognition_service import FaceRecognitionService
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -37,6 +38,7 @@ class ConversationService:
         listener: Optional[ContinuousListenerService] = None,
         music_player: Optional[MusicPlayer] = None,
         motion_dispatcher: Optional[MotionDispatcher] = None,
+        face_recognition: Optional[FaceRecognitionService] = None,
     ) -> None:
         self._audio = audio
         self._display = display
@@ -44,10 +46,11 @@ class ConversationService:
         self._speech = speech
         self._backend = backend
         self._voice_name = voice_name
-        self._extra_text = extra_text
+        self._extra_text = extra_text  # legacy fallback when face reco is disabled
         self._gesture_during_speech = gesture_during_speech
         self._listener = listener
         self._music_player = music_player
+        self._face_recognition = face_recognition
         self._motion_dispatcher = motion_dispatcher or MotionDispatcher(motion)
 
     async def run_turn(self, listen_seconds: Optional[float] = None) -> None:
@@ -112,14 +115,32 @@ class ConversationService:
         finally:
             await self._display.resume_idle()
 
+    async def _resolve_extra_text(self) -> Optional[str]:
+        """Decide what to put between parentheses after the STT result.
+
+        Priority: live face recognition → legacy static `extra_text` → None.
+        Returns "inconnu" rather than None when face reco is enabled so the
+        backend's n8n always sees a `persone:` slot (the workflow's Code2
+        node uses it for the prompt).
+        """
+        if self._face_recognition is not None:
+            try:
+                name = await self._face_recognition.identify()
+                return name or self._extra_text
+            except Exception:
+                logger.exception("Face recognition failed — falling back to static extra_text")
+        return self._extra_text
+
     async def _process_audio(self, wav_in: bytes) -> None:
         try:
             _DEBUG_CAPTURE_WAV.write_bytes(wav_in)
         except OSError as exc:
             logger.debug("Could not save debug capture WAV: %s", exc)
+
+        extra_text = await self._resolve_extra_text()
         logger.info(
             "📥 Captured %d bytes (saved to %s)  extra_text=%r  voice=%r",
-            len(wav_in), _DEBUG_CAPTURE_WAV, self._extra_text, self._voice_name,
+            len(wav_in), _DEBUG_CAPTURE_WAV, extra_text, self._voice_name,
         )
 
         await self._display.set_expression(Expression.THINKING)
@@ -127,7 +148,7 @@ class ConversationService:
         try:
             result = await self._backend.speech_to_action(
                 wav_in,
-                extra_text=self._extra_text,
+                extra_text=extra_text,
                 voice_name=self._voice_name,
             )
         except Exception as exc:

@@ -8,6 +8,7 @@ from typing import Awaitable, Callable, Optional
 from adapters.arduino_adapter import ArduinoAdapter
 from adapters.audio_output_adapter import AudioOutputAdapter
 from adapters.backend_client import BackendClient
+from adapters.camera_adapter import CameraAdapter
 from adapters.nextion_adapter import NextionAdapter
 from adapters.respeaker_adapter import RespeakerAdapter
 from app.config import AppConfig, load_config
@@ -27,6 +28,7 @@ from services.motion.motion_service import (
     shortest_signed_angle,
 )
 from services.speech.speech_service import SpeechService
+from services.vision.face_recognition_service import FaceRecognitionService
 from services.wake_word.default_keywords import DEFAULT_KEYWORDS
 from services.wake_word.wake_word_matcher import WakeWordMatcher
 from services.wake_word.wake_word_service import WakeWordService
@@ -212,6 +214,7 @@ async def _run_wake_word_loop(
     config: AppConfig,
     stop_event: asyncio.Event,
     doa_reader: Optional[DOAReader] = None,
+    face_recognition: Optional[FaceRecognitionService] = None,
 ) -> None:
     greeting_text = config.conversation.greeting_text or "أهلا بيك"
 
@@ -225,6 +228,12 @@ async def _run_wake_word_loop(
         state("WAKE", f"keyword={match.keyword!r}")
         await _safe_async("display.set_expression(SURPRISED)",
                           display.set_expression(Expression.SURPRISED))
+
+        # Identify the speaker NOW, in the background. The capture + backend
+        # round-trip (~1s) overlaps with the rotation + greeting that follow,
+        # so by the time we send the first question the cached name is ready.
+        if face_recognition is not None:
+            face_recognition.fire_and_forget_refresh()
 
         # Rotate immediately on the wake-word DOA snapshot (it's fresh — the user
         # just spoke the keyword).
@@ -400,6 +409,28 @@ async def run(config: AppConfig) -> None:
     music_player = MusicPlayer(audio_output, music_cache_dir, config.backend.base_url)
     logger.info("MusicPlayer ready (cache dir=%s, backend=%s)", music_cache_dir, config.backend.base_url)
 
+    face_recognition: Optional[FaceRecognitionService] = None
+    if config.face_recognition.enabled:
+        camera = CameraAdapter(
+            width=config.camera.width,
+            height=config.camera.height,
+            capture_timeout_ms=config.camera.capture_timeout_ms,
+        )
+        face_recognition = FaceRecognitionService(
+            camera=camera,
+            backend=backend,
+            cache_seconds=config.face_recognition.cache_seconds,
+            fallback_name=config.face_recognition.fallback_name,
+        )
+        logger.info(
+            "Face recognition enabled (cache=%.0fs, camera=%dx%d, fallback=%r)",
+            config.face_recognition.cache_seconds,
+            config.camera.width, config.camera.height,
+            config.face_recognition.fallback_name,
+        )
+    else:
+        logger.info("Face recognition disabled (FACE_RECOGNITION_ENABLED=0)")
+
     conversation = ConversationService(
         audio=audio,
         display=display,
@@ -411,6 +442,7 @@ async def run(config: AppConfig) -> None:
         gesture_during_speech=config.conversation.play_gesture_during_speech,
         listener=listener,
         music_player=music_player,
+        face_recognition=face_recognition,
     )
 
     wake_word = _build_wake_word_service(config, audio, backend, respeaker)
@@ -437,7 +469,7 @@ async def run(config: AppConfig) -> None:
 
     try:
         if wake_word is not None:
-            await _run_wake_word_loop(wake_word, conversation, display, motion, speech, config, stop_event, doa_reader)
+            await _run_wake_word_loop(wake_word, conversation, display, motion, speech, config, stop_event, doa_reader, face_recognition)
         else:
             await _run_legacy_loop(conversation, config, stop_event)
     finally:

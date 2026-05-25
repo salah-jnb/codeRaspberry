@@ -127,6 +127,22 @@ class ListenerConfigEntry:
 
 
 @dataclass(frozen=True)
+class CameraConfig:
+    width: int = 1280
+    height: int = 720
+    capture_timeout_ms: int = 500
+
+
+@dataclass(frozen=True)
+class FaceRecognitionConfig:
+    enabled: bool = True
+    # Reuse the identified name across follow-ups without re-capturing.
+    cache_seconds: float = 60.0
+    # Fallback when no face is detected / camera fails.
+    fallback_name: str = "inconnu"
+
+
+@dataclass(frozen=True)
 class RotationConfig:
     """Open-loop rotation toward the speaker (DOA → motor pulse)."""
     enabled: bool = True
@@ -162,6 +178,8 @@ class AppConfig:
     vosk: VoskConfig = field(default_factory=VoskConfig)
     listener: ListenerConfigEntry = field(default_factory=ListenerConfigEntry)
     rotation: RotationConfig = field(default_factory=RotationConfig)
+    camera: CameraConfig = field(default_factory=CameraConfig)
+    face_recognition: FaceRecognitionConfig = field(default_factory=FaceRecognitionConfig)
 
 
 def load_config() -> AppConfig:
@@ -233,6 +251,16 @@ def load_config() -> AppConfig:
         invert_direction=_env_str("ROTATION_INVERT_DIRECTION", "0") in {"1", "true", "yes"},
         lut=_parse_rotation_lut(_env_optional("ROTATION_LUT")),
     )
+    camera = CameraConfig(
+        width=_env_int("CAMERA_WIDTH", 1280),
+        height=_env_int("CAMERA_HEIGHT", 720),
+        capture_timeout_ms=_env_int("CAMERA_CAPTURE_TIMEOUT_MS", 500),
+    )
+    face_recognition = FaceRecognitionConfig(
+        enabled=_env_str("FACE_RECOGNITION_ENABLED", "1") not in {"0", "false", "no"},
+        cache_seconds=_env_float("FACE_RECOGNITION_CACHE_SECONDS", 60.0),
+        fallback_name=_env_str("FACE_RECOGNITION_FALLBACK", "inconnu"),
+    )
     return AppConfig(
         robot_id=_env_str("ROBOT_ID", "koda-01"),
         log_level=_env_str("LOG_LEVEL", "INFO"),
@@ -246,6 +274,8 @@ def load_config() -> AppConfig:
         vosk=vosk,
         listener=listener,
         rotation=rotation,
+        camera=camera,
+        face_recognition=face_recognition,
     )
 
 
