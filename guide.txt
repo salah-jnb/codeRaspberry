@@ -1,5 +1,13 @@
 // initialiser environnement
 source .venv/bin/activate
+
+// Micro (OBLIGATOIRE si Vosk heartbeat RMS peak=0)
+// Test manuel : arecord -D plughw:3,0 -f S16_LE -r 16000 -c 1 -d 5 /tmp/t.wav && sox /tmp/t.wav -n stat | grep Maximum
+// Si Maximum > 0.15 en parlant, dans .env :
+//   RESPEAKER_DEVICE=plughw:3,0
+// (pipewire seulement si wpctl set-default pointe vers ReSpeaker / source_noise_suppressed)
+export RESPEAKER_DEVICE=plughw:3,0
+
 python -m app.main
 // backend FastAPI sur le PC (meme Wi-Fi que le Pi)
 // IP Wi-Fi du PC (verifie avec ipconfig) — ex. 192.168.69.185

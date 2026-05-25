@@ -343,6 +343,13 @@ async def run(config: AppConfig) -> None:
         channels=config.respeaker.channels,
         sample_format=config.respeaker.sample_format,
     )
+    logger.info(
+        "Mic capture: arecord -D %s -f %s -r %d -c %d",
+        config.respeaker.alsa_device,
+        config.respeaker.sample_format,
+        config.respeaker.sample_rate,
+        config.respeaker.channels,
+    )
     audio_output = AudioOutputAdapter(
         bluetooth_mac=config.audio_output.bluetooth_mac,
         pulse_sink=config.audio_output.pulse_sink,

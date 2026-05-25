@@ -153,10 +153,17 @@ class VoskWakeWordEngine:
                         "OK"
                     )
                     logger.info(
-                        "Vosk heartbeat — %d chunks, RMS avg=%d peak=%d [%s] | last partial=%r",
+                        "Vosk heartbeat — %d chunks, RMS avg=%d peak=%d [%s] | device=%s | last partial=%r",
                         chunks_seen, int(avg), rms_peak, quality,
+                        self._respeaker._device,
                         last_logged_partial[:80] or "<empty>",
                     )
+                    if rms_peak < 150 and chunks_seen == 40:
+                        logger.warning(
+                            "Capture is silent on %r. If arecord -D plughw:3,0 works in a manual test, "
+                            "set RESPEAKER_DEVICE=plughw:3,0 in .env (or wpctl set-default to ReSpeaker for pipewire).",
+                            self._respeaker._device,
+                        )
                     rms_sum = 0.0
                     rms_peak = 0
 
