@@ -132,6 +132,21 @@ class VoskWakeWordEngine:
         # every partial/final hypothesis (useful when no wake word is detected
         # and you want to see what the recognizer thinks it's hearing).
         log_all_partials = os.environ.get("VOSK_LOG_ALL_PARTIALS", "0").strip() in {"1", "true", "yes"}
+        # Audio dump for offline diagnosis: set VOSK_DUMP_AUDIO_PATH=/tmp/vosk_in.raw
+        # to mirror every PCM byte sent to Vosk into a file. Convert + listen with:
+        #   sox -t raw -r 16000 -e signed-integer -b 16 -c 1 /tmp/vosk_in.raw /tmp/vosk_in.wav
+        #   aplay /tmp/vosk_in.wav
+        # Then feed it through the standalone test:
+        #   python3 /tmp/test_vosk.py /tmp/vosk_in.wav
+        dump_audio_path = os.environ.get("VOSK_DUMP_AUDIO_PATH", "").strip() or None
+        dump_audio_file = None
+        if dump_audio_path:
+            try:
+                dump_audio_file = open(dump_audio_path, "wb")  # noqa: SIM115
+                logger.info("VOSK_DUMP_AUDIO_PATH=%s — mirroring PCM stream to disk", dump_audio_path)
+            except OSError as exc:
+                logger.warning("Cannot open dump file %s: %s", dump_audio_path, exc)
+                dump_audio_path = None
 
         stream = self._respeaker.stream_pcm(self._chunk_bytes)
         chunks_seen = 0
@@ -149,6 +164,13 @@ class VoskWakeWordEngine:
                     return None
 
                 chunks_seen += 1
+                if dump_audio_file is not None:
+                    try:
+                        dump_audio_file.write(chunk)
+                        dump_audio_file.flush()
+                    except OSError:
+                        logger.exception("Audio dump write failed; disabling dump")
+                        dump_audio_file = None
                 # Compute real RMS amplitude on the S16_LE PCM payload.
                 # Speech at normal volume typically sits in [800, 5000].
                 # < ~150 = effective silence or broken capture; > ~10000 = clipping.
@@ -247,4 +269,11 @@ class VoskWakeWordEngine:
             logger.info("Closing Vosk audio stream...")
             await stream.aclose()
             logger.info("Vosk audio stream closed (mic lock released)")
+            if dump_audio_file is not None:
+                try:
+                    dump_audio_file.close()
+                    size = Path(dump_audio_path).stat().st_size if dump_audio_path else 0
+                    logger.info("Vosk audio dump closed: %s (%d bytes)", dump_audio_path, size)
+                except OSError:
+                    pass
         return None
