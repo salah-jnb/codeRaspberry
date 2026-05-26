@@ -219,49 +219,48 @@ async def _run_wake_word_loop(
     greeting_text = config.conversation.greeting_text or "أهلا بيك"
 
     while not stop_event.is_set():
-        state("PASSIVE", "waiting for wake word", keywords=len(wake_word._matcher.keywords))
+        state("PASSIVE", f"{len(wake_word._matcher.keywords)} keywords")
         match = await wake_word.wait_for_wake(stop_event)
-        logger.info("[debug] main: wake_word.wait_for_wake returned match=%r", match)
         if match is None:
             return
 
-        state("WAKE", f"keyword={match.keyword!r}")
-        await _safe_async("display.set_expression(SURPRISED)",
-                          display.set_expression(Expression.SURPRISED))
+        state("WAKE", match.keyword)
 
-        # Identify the speaker NOW, in the background. The capture + backend
-        # round-trip (~1s) overlaps with the rotation + greeting that follow,
-        # so by the time we send the first question the cached name is ready.
+        # ── Parallel kickoff: visuel + rotation + greeting + face-reco (FAF) ──
+        # Aucune dépendance entre eux. La rotation tourne pendant que le greeting
+        # parle, et la face-reco se cache en background pour le 1er tour.
+        async def _greet():
+            if greeting_text:
+                await speech.speak(greeting_text)
+
+        rotate_task: Optional[asyncio.Task] = None
+        if doa_reader is not None and doa_reader.available and config.rotation.enabled:
+            rotate_task = asyncio.create_task(_rotate_toward_speaker(
+                doa_reader, motion, config, label="wake", wait_for_voice_s=0.0,
+            ))
         if face_recognition is not None:
             face_recognition.fire_and_forget_refresh()
 
-        # Rotate immediately on the wake-word DOA snapshot (it's fresh — the user
-        # just spoke the keyword).
-        await _rotate_toward_speaker(
-            doa_reader, motion, config, label="wake-word", wait_for_voice_s=0.0,
+        await asyncio.gather(
+            display.set_expression(Expression.SURPRISED),
+            _greet(),
+            return_exceptions=True,
         )
+        # Ensure rotation is finished before opening the mic (motor noise would
+        # poison the VAD threshold).
+        if rotate_task is not None:
+            try:
+                await rotate_task
+            except Exception:
+                logger.exception("rotation task failed")
 
-        if hasattr(motion, "_adapter") and motion._adapter.is_open:
-            await _safe_async("motion.hello (ack)", motion.hello())
-
-        if match.remainder:
-            logger.info("    (wake-word chunk also contained %r — ignored, capturing fresh question)",
-                        match.remainder)
-
-        state("GREET", f"saying {greeting_text!r}")
-        await _safe_async("speech.speak (greeting)", speech.speak(greeting_text))
-
-        # The greeting takes ~1.5s; the user might have shifted, so re-orient
-        # before the first question by waiting briefly for their next utterance.
-        await _rotate_toward_speaker(
-            doa_reader, motion, config, label="first-question", wait_for_voice_s=2.5,
-        )
-
-        state("ACTIVE", "listening for question (VAD)")
+        # ── Listen immediately — no second rotation pass ──
+        state("ACTIVE")
         await _safe_async("display.set_expression(THINKING)",
                           display.set_expression(Expression.THINKING))
         await conversation.listen_and_answer()
 
+        # ── Follow-up turns ──
         consecutive_silences = 0
         max_silences = max(0, config.conversation.max_active_silences)
         while not stop_event.is_set() and consecutive_silences < max_silences:
@@ -274,22 +273,20 @@ async def _run_wake_word_loop(
             except asyncio.TimeoutError:
                 pass
 
-            state("ACTIVE", f"follow-up turn ({consecutive_silences + 1}/{max_silences} silences allowed)")
-            # Re-orient the chassis toward the speaker before each follow-up:
-            # the user may have moved silently between turns. We poll the XMOS
-            # voice-activity bit briefly so we rotate at the moment they start
-            # speaking, not based on a stale angle from the previous question.
+            state("ACTIVE", f"follow-up {consecutive_silences + 1}/{max_silences}")
+            # Re-orient toward the speaker — but only briefly poll voice so the
+            # user doesn't wait if they speak right away.
             await _rotate_toward_speaker(
-                doa_reader, motion, config, label="follow-up", wait_for_voice_s=2.5,
+                doa_reader, motion, config, label="follow", wait_for_voice_s=1.5,
             )
             had_speech = await _run_active_turn(conversation)
             if had_speech:
                 consecutive_silences = 0
             else:
                 consecutive_silences += 1
-                state("SILENCE", f"{consecutive_silences}/{max_silences} consecutive silences")
+                state("SILENCE", f"{consecutive_silences}/{max_silences}")
 
-        state("SLEEP", "back to wake-word watch")
+        state("SLEEP")
         await _safe_async("display.resume_idle", display.resume_idle())
 
 

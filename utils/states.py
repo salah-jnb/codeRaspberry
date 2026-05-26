@@ -53,14 +53,14 @@ def _format_extras(extras: dict[str, Any]) -> str:
 
 def state(tag: str, message: str = "", **extras: Any) -> None:
     symbol = SYMBOLS.get(tag, "•")
-    body = f" — {message}" if message else ""
+    body = f" {message}" if message else ""
     body += _format_extras(extras)
-    logger.info("%s  %-8s%s", symbol, tag, body)
+    logger.info("%s %s%s", symbol, tag, body)
 
 
 def warn(message: str, **extras: Any) -> None:
-    logger.warning("%s  %s%s", SYMBOLS["WARN"], message, _format_extras(extras))
+    logger.warning("%s%s", message, _format_extras(extras))
 
 
 def error(message: str, **extras: Any) -> None:
-    logger.error("%s  %s%s", SYMBOLS["ERROR"], message, _format_extras(extras))
+    logger.error("%s%s", message, _format_extras(extras))

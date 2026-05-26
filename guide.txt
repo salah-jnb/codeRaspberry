@@ -1,6 +1,8 @@
 // initialiser environnement
 source .venv/bin/activate
 python -m app.main
+
+deactivate
 // Micro (OBLIGATOIRE si Vosk heartbeat RMS peak=0)
 // Test manuel : arecord -D plughw:3,0 -f S16_LE -r 16000 -c 1 -d 5 /tmp/t.wav && sox /tmp/t.wav -n stat | grep Maximum
 // Si Maximum > 0.15 en parlant, dans .env :
