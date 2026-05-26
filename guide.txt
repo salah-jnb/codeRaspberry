@@ -53,3 +53,17 @@ Set-Location "c:\pfe\Distributeur-Des-Service-Python"
 // Start-Sleep -Seconds 2
 // Set-Location "c:\pfe\Distributeur-Des-Service-Python"
 // python -m uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+
+
+
+# 1. Sauvegarder ton .env local
+cp .env .env.local.bak
+
+# 2. Mettre tes modifs locales de côté (git stash)
+git stash push -m "local Pi .env" -- .env
+
+# 3. Pull tranquille
+git pull
+
+# 4. Récupérer tes modifs (peut générer un conflit si la version distante a aussi changé)
+git stash pop
