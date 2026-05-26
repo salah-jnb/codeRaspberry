@@ -1,6 +1,6 @@
 // initialiser environnement
 source .venv/bin/activate
-
+python -m app.main
 // Micro (OBLIGATOIRE si Vosk heartbeat RMS peak=0)
 // Test manuel : arecord -D plughw:3,0 -f S16_LE -r 16000 -c 1 -d 5 /tmp/t.wav && sox /tmp/t.wav -n stat | grep Maximum
 // Si Maximum > 0.15 en parlant, dans .env :
@@ -8,11 +8,17 @@ source .venv/bin/activate
 // (pipewire seulement si wpctl set-default pointe vers ReSpeaker / source_noise_suppressed)
 export RESPEAKER_DEVICE=plughw:3,0
 
+// --- Backend PC (hostname mDNS, meme Wi-Fi) ---
+// Sur Windows : hostname  →  ex. SALAH_DESKTOP  →  URL Pi : http://SALAH_DESKTOP.local:8765
+export BACKEND_URL=http://SALAH_DESKTOP.local:8765
+export BACKEND_TIMEOUT=120
+// Test depuis le Pi AVANT app.main :
+//   ping -c 2 SALAH_DESKTOP.local
+//   curl -s --max-time 5 http://SALAH_DESKTOP.local:8765/
+// Si ping/curl echouent : sudo apt install avahi-utils && fallback IP :
+//   export BACKEND_URL=http://192.168.69.185:8765
+
 python -m app.main
-// backend FastAPI sur le PC (meme Wi-Fi que le Pi)
-// IP Wi-Fi du PC (verifie avec ipconfig) — ex. 192.168.69.185
-export BACKEND_URL=http://192.168.69.185:8765
-// ou nom mDNS si le Pi le resout : BACKEND_URL=http://SALAH_DESKTOP.local:8765
 
 //cablage ecran
 RX (Jaune/) -> Pin 8 (GPIO 14 - TX) du Raspberry Pi.
@@ -25,12 +31,6 @@ TX (Bleu) -> Pin 10 (GPIO 15 - RX) du Raspberry Pi.
 export NEXTION_PORT=/dev/serial0
 export NEXTION_REQUIRE_GPIO_UART=1
 
-// HC-05 de l'arduino
-export HC05_MAC=00:22:12:02:35:16
-// RFCOMM serie pour HC-05 (apres bind)
-// sudo rfcomm bind 0 00:22:12:02:35:16
-export HC05_RFCOMM_DEVICE=/dev/rfcomm0
-// Regle BLE: DETECTED uniquement si /dev/rfcomm0 existe
 
 // Audio sortie (carte ALSA exacte)
 // verifie avec:                 

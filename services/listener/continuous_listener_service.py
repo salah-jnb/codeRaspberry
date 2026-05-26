@@ -50,14 +50,24 @@ class ContinuousListenerService:
     async def _record_with_vad(self) -> bytes:
         out_path = Path(tempfile.mkstemp(suffix=".wav", prefix="koda_listen_")[1])
         cfg = self._config
+        native_ch = self._adapter_native_channels()
+        processed_idx = self._adapter_processed_channel()
+        # Capture the firmware's native channel count, then `remix N` keeps ONLY
+        # the DSP-processed channel (ch0 by default). This is what fixes the
+        # "ALSA averages 6 channels into 1" dilution that was destroying VAD
+        # sensitivity AND Azure STT accuracy on noisy clips.
         cmd = [
             "sox",
             "-q",
             "-t", "alsa", self._adapter_device(),
             "-r", str(self._adapter_sample_rate()),
-            "-c", str(self._adapter_channels()),
+            "-c", str(native_ch),
             "-b", "16",
             "-t", "wav", str(out_path),
+        ]
+        if native_ch > 1:
+            cmd += ["remix", str(processed_idx + 1)]  # sox is 1-indexed
+        cmd += [
             "silence",
             "1", f"{cfg.min_speech_seconds:.2f}", f"{cfg.start_threshold_pct}%",
             "1", f"{cfg.silence_duration_s:.2f}", f"{cfg.silence_threshold_pct}%",
@@ -107,3 +117,12 @@ class ContinuousListenerService:
 
     def _adapter_channels(self) -> int:
         return getattr(self._adapter, "_channels")
+
+    def _adapter_native_channels(self) -> int:
+        """Channels the ReSpeaker firmware actually exposes (6 by default).
+        Falls back to output `_channels` for adapters that don't track this
+        separately (e.g. non-ReSpeaker mics)."""
+        return getattr(self._adapter, "_native_channels", self._adapter_channels())
+
+    def _adapter_processed_channel(self) -> int:
+        return getattr(self._adapter, "_processed_channel_index", 0)

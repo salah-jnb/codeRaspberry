@@ -59,9 +59,16 @@ class BackendConfig:
 class RespeakerConfig:
     alsa_device: str = "plughw:3,0"
     sample_rate: int = 16000
-    channels: int = 1
+    channels: int = 1  # output channels delivered to consumers (Vosk / Azure STT) — keep at 1
     record_seconds: float = 5.0
     sample_format: str = "S16_LE"
+    # Number of channels the ReSpeaker firmware exposes on USB BEFORE remix.
+    # ReSpeaker 4-Mic Array v2.0 default firmware = 6 channels:
+    #   ch0 = AEC+BF+NS+AGC processed mono, ch1-4 = raw mics, ch5 = playback ref.
+    # If you flashed the 1-channel firmware, set this to 1 to skip the remix step.
+    native_channels: int = 6
+    # Which native channel to keep after remix (0-based). ch0 = processed audio.
+    processed_channel_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -195,6 +202,8 @@ def load_config() -> AppConfig:
         channels=_env_int("RESPEAKER_CHANNELS", 1),
         record_seconds=_env_float("RESPEAKER_RECORD_SECONDS", 5.0),
         sample_format=_env_str("RESPEAKER_SAMPLE_FORMAT", "S16_LE"),
+        native_channels=_env_int("RESPEAKER_NATIVE_CHANNELS", 6),
+        processed_channel_index=_env_int("RESPEAKER_PROCESSED_CHANNEL_INDEX", 0),
     )
     audio_output = AudioOutputConfig(
         bluetooth_mac=_env_optional("BLUETOOTH_MAC") or "AD:1C:99:E7:9B:78",

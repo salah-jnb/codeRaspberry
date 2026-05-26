@@ -342,13 +342,18 @@ async def run(config: AppConfig) -> None:
         sample_rate=config.respeaker.sample_rate,
         channels=config.respeaker.channels,
         sample_format=config.respeaker.sample_format,
+        native_channels=config.respeaker.native_channels,
+        processed_channel_index=config.respeaker.processed_channel_index,
     )
     logger.info(
-        "Mic capture: arecord -D %s -f %s -r %d -c %d",
+        "Mic capture: device=%s native_channels=%d → mono ch%d, rate=%d, denoise=%s",
         config.respeaker.alsa_device,
-        config.respeaker.sample_format,
+        config.respeaker.native_channels,
+        config.respeaker.processed_channel_index,
         config.respeaker.sample_rate,
-        config.respeaker.channels,
+        "ON (sox remix on XMOS-processed channel)"
+        if config.respeaker.native_channels > 1
+        else "OFF (single-channel firmware)",
     )
     audio_output = AudioOutputAdapter(
         bluetooth_mac=config.audio_output.bluetooth_mac,

@@ -126,9 +126,14 @@ class ConversationService:
         if self._face_recognition is not None:
             try:
                 name = await self._face_recognition.identify()
-                return name or self._extra_text
+                if name and name.strip():
+                    return name.strip()
             except Exception:
                 logger.exception("Face recognition failed — falling back to static extra_text")
+        if self._extra_text and str(self._extra_text).strip():
+            return str(self._extra_text).strip()
+        if self._face_recognition is not None:
+            return "inconnu"
         return self._extra_text
 
     async def _process_audio(self, wav_in: bytes) -> None:
