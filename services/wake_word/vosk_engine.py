@@ -15,6 +15,7 @@ import array
 import asyncio
 import json
 import math
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -127,11 +128,21 @@ class VoskWakeWordEngine:
         logger.info("Vosk wake-word engine listening (keywords=%d variants, chunk=%d bytes)",
                     len(self._matcher.keywords), self._chunk_bytes)
 
+        # Verbose Vosk logging: set VOSK_LOG_ALL_PARTIALS=1 in .env to dump
+        # every partial/final hypothesis (useful when no wake word is detected
+        # and you want to see what the recognizer thinks it's hearing).
+        log_all_partials = os.environ.get("VOSK_LOG_ALL_PARTIALS", "0").strip() in {"1", "true", "yes"}
+
         stream = self._respeaker.stream_pcm(self._chunk_bytes)
         chunks_seen = 0
+        partials_seen_this_window = 0
+        partials_nonempty_this_window = 0
+        finals_seen_this_window = 0
         rms_sum = 0.0
         rms_peak = 0
         last_logged_partial = ""
+        if log_all_partials:
+            logger.info("VOSK_LOG_ALL_PARTIALS=1 — every Vosk hypothesis will be logged at INFO")
         try:
             async for chunk in stream:
                 if stop_event is not None and stop_event.is_set():
@@ -153,9 +164,11 @@ class VoskWakeWordEngine:
                         "OK"
                     )
                     logger.info(
-                        "Vosk heartbeat — %d chunks, RMS avg=%d peak=%d [%s] | device=%s | last partial=%r",
+                        "Vosk heartbeat — %d chunks, RMS avg=%d peak=%d [%s] | device=%s | "
+                        "partials=%d (non-empty=%d) finals=%d | last partial=%r",
                         chunks_seen, int(avg), rms_peak, quality,
                         self._respeaker._device,
+                        partials_seen_this_window, partials_nonempty_this_window, finals_seen_this_window,
                         last_logged_partial[:80] or "<empty>",
                     )
                     if rms_peak < 150 and chunks_seen == 40:
@@ -164,18 +177,42 @@ class VoskWakeWordEngine:
                             "set RESPEAKER_DEVICE=plughw:3,0 in .env (or wpctl set-default to ReSpeaker for pipewire).",
                             self._respeaker._device,
                         )
+                    if (rms_peak >= 600 and partials_nonempty_this_window == 0
+                            and finals_seen_this_window == 0):
+                        logger.warning(
+                            "Vosk got %.1fs of audible speech (peak RMS=%d) but produced 0 hypotheses. "
+                            "Likely causes: wrong language model, accent the model can't decode, "
+                            "or PCM format mismatch (expected: S16_LE mono @ %dHz).",
+                            chunks_seen * (self._chunk_bytes / (16000.0 * 2)),
+                            rms_peak,
+                            self._respeaker.sample_rate,
+                        )
                     rms_sum = 0.0
                     rms_peak = 0
+                    partials_seen_this_window = 0
+                    partials_nonempty_this_window = 0
+                    finals_seen_this_window = 0
 
                 final = await asyncio.to_thread(recognizer.AcceptWaveform, chunk)
                 if final:
+                    finals_seen_this_window += 1
                     text = json.loads(recognizer.Result()).get("text", "")
-                    if text:
+                    if log_all_partials or text:
                         logger.info("Vosk FINAL: %r", text[:200])
                 else:
+                    partials_seen_this_window += 1
                     text = json.loads(recognizer.PartialResult()).get("partial", "")
-                    if text and text != last_logged_partial:
+                    if text:
+                        partials_nonempty_this_window += 1
+                    if log_all_partials:
+                        # Log every single partial (even empty + duplicates).
+                        logger.info(
+                            "Vosk partial #%d: %r",
+                            partials_seen_this_window, text[:200] or "<empty>",
+                        )
+                    elif text and text != last_logged_partial:
                         logger.info("Vosk partial: %r", text[:200])
+                    if text:
                         last_logged_partial = text
 
                 if not text:
