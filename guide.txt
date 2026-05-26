@@ -9,14 +9,14 @@ python -m app.main
 export RESPEAKER_DEVICE=plughw:3,0
 
 // --- Backend PC (hostname mDNS, meme Wi-Fi) ---
-// Sur Windows : hostname  →  ex. SALAH_DESKTOP  →  URL Pi : http://SALAH_DESKTOP.local:8765
-export BACKEND_URL=http://SALAH_DESKTOP.local:8765
+// Sur Windows : hostname  →  ex. SALAH_DESKTOP  →  URL Pi : http://SALAH_DESKTOP.local:8000
+export BACKEND_URL=http://SALAH_DESKTOP.local:8000
 export BACKEND_TIMEOUT=120
 // Test depuis le Pi AVANT app.main :
 //   ping -c 2 SALAH_DESKTOP.local
-//   curl -s --max-time 5 http://SALAH_DESKTOP.local:8765/
+//   curl -s --max-time 5 http://SALAH_DESKTOP.local:8000/
 // Si ping/curl echouent : sudo apt install avahi-utils && fallback IP :
-//   export BACKEND_URL=http://192.168.69.185:8765
+//   export BACKEND_URL=http://192.168.69.185:8000
 
 python -m app.main
 
@@ -42,3 +42,14 @@ export AUDIO_CARD_INDEX=1
 
 
 sudo nmcli connection up aa
+
+$conns = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
+foreach ($p in $conns) { if ($p -gt 0) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } }
+Start-Sleep -Seconds 2
+Set-Location "c:\pfe\Distributeur-Des-Service-Python"
+// --- PC Windows : relancer le backend (port 8000) ---
+// $conns = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
+// foreach ($p in $conns) { if ($p -gt 0) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } }
+// Start-Sleep -Seconds 2
+// Set-Location "c:\pfe\Distributeur-Des-Service-Python"
+// python -m uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload

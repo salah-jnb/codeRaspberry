@@ -1,0 +1,17 @@
+[Unit]
+Description=KODA BLE Wi-Fi provisioning service
+After=bluetooth.target NetworkManager.service
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/codeRaspberry
+Environment=PYTHONUNBUFFERED=1
+Environment=ROBOT_ID=koda-01
+ExecStart=/home/pi/codeRaspberry/.venv/bin/python -m scripts.ble_wifi_provisioner
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
