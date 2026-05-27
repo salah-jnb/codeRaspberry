@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
@@ -54,6 +56,25 @@ _COMPONENT_LABELS = {
 }
 
 
+def _thread_pool_workers() -> int:
+    raw = os.environ.get("KODA_THREAD_WORKERS", "").strip()
+    if raw:
+        try:
+            return max(2, int(raw))
+        except ValueError:
+            warn(f"Invalid KODA_THREAD_WORKERS={raw!r}; using automatic value")
+    cpu_count = os.cpu_count() or 4
+    return max(4, min(12, cpu_count + 4))
+
+
+def _install_runtime_thread_pool() -> ThreadPoolExecutor:
+    workers = _thread_pool_workers()
+    executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="koda-io")
+    asyncio.get_running_loop().set_default_executor(executor)
+    logger.info("Runtime thread pool ready (workers=%d)", workers)
+    return executor
+
+
 def _label(check_name: str) -> str:
     return _COMPONENT_LABELS.get(check_name, check_name)
 
@@ -89,6 +110,105 @@ async def _safe_async(label: str, awaitable: Awaitable) -> None:
         logger.exception("%s failed", label)
 
 
+async def _safe_to_thread(label: str, func: Callable[[], object]) -> Optional[object]:
+    try:
+        return await asyncio.to_thread(func)
+    except Exception:
+        logger.exception("%s failed", label)
+        return None
+
+
+async def _open_adapters_parallel(
+    nextion: NextionAdapter,
+    arduino: ArduinoAdapter,
+) -> None:
+    state("BOOT", "opening serial adapters in parallel")
+    await asyncio.gather(
+        asyncio.to_thread(_safe_open, "Nextion", nextion.open),
+        asyncio.to_thread(_safe_open, "Arduino", arduino.open),
+    )
+
+
+async def _connect_audio_and_probe_backend(
+    audio_output: AudioOutputAdapter,
+    backend: BackendClient,
+    config: AppConfig,
+) -> None:
+    async def _ensure_bluetooth() -> bool:
+        if not config.audio_output.auto_connect:
+            return True
+        connected = await audio_output.ensure_bluetooth()
+        if connected:
+            state("READY", f"Bluetooth speaker {config.audio_output.bluetooth_mac}")
+        else:
+            warn("Bluetooth speaker unavailable -- falling back to default sink")
+        return connected
+
+    async def _health_probe() -> bool:
+        ok = await backend.health()
+        if not ok:
+            warn("Backend health probe failed (continuing -- may recover)")
+        return ok
+
+    await backend.start()
+    state("BOOT", "probing backend and audio output in parallel")
+    await asyncio.gather(_ensure_bluetooth(), _health_probe())
+
+
+async def _prepare_doa_reader(
+    doa_reader: DOAReader,
+    config: AppConfig,
+    rotation_calib: RotationCalibration,
+) -> None:
+    if not config.rotation.enabled:
+        logger.info("Rotation auto desactivee (ROTATION_ENABLED=0)")
+        return
+
+    started = await asyncio.to_thread(doa_reader.start)
+    if started:
+        logger.info(
+            "Rotation auto vers le locuteur activÃ©e (slope=%.1fÂ°/s, offset=%.1fÂ°, "
+            "front=%.1fÂ°, invert=%s, LUT=%d points)",
+            rotation_calib.slope_deg_per_s, rotation_calib.offset_deg,
+            rotation_calib.front_offset_deg, rotation_calib.invert_direction,
+            len(rotation_calib.lut),
+        )
+    else:
+        logger.warning("DOA reader unavailable -- rotation toward speaker disabled")
+
+
+async def _prepare_startup_services(
+    *,
+    wake_word: Optional[WakeWordService],
+    display: DisplayService,
+    motion: MotionService,
+    nextion: NextionAdapter,
+    arduino: ArduinoAdapter,
+    doa_reader: DOAReader,
+    config: AppConfig,
+    rotation_calib: RotationCalibration,
+) -> None:
+    tasks: list[asyncio.Task] = [
+        asyncio.create_task(_prepare_doa_reader(doa_reader, config, rotation_calib))
+    ]
+
+    if wake_word is not None:
+        tasks.append(asyncio.create_task(
+            _safe_async("wake_word.prepare", wake_word.prepare())
+        ))
+    if nextion.is_open:
+        tasks.append(asyncio.create_task(
+            _safe_async("display.resume_idle", display.resume_idle())
+        ))
+    if arduino.is_open:
+        tasks.append(asyncio.create_task(
+            _safe_async("motion.hello (greeting)", motion.hello())
+        ))
+
+    state("BOOT", f"preparing {len(tasks)} startup services in parallel")
+    await asyncio.gather(*tasks, return_exceptions=False)
+
+
 async def _shutdown(
     backend: BackendClient,
     nextion: NextionAdapter,
@@ -101,14 +221,8 @@ async def _shutdown(
     if arduino.is_open:
         await _safe_async("motion.stop", motion.stop())
     await _safe_async("backend.close", backend.close())
-    try:
-        nextion.close()
-    except Exception:
-        logger.exception("Nextion close failed")
-    try:
-        arduino.close()
-    except Exception:
-        logger.exception("Arduino close failed")
+    await _safe_to_thread("nextion.close", nextion.close)
+    await _safe_to_thread("arduino.close", arduino.close)
     state("SHUTDOWN", "stopped")
 
 
@@ -181,17 +295,17 @@ async def _rotate_toward_speaker(
     raw_angle = None
     source = "snapshot"
     if wait_for_voice_s > 0:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         deadline = loop.time() + wait_for_voice_s
         while loop.time() < deadline:
-            if doa_reader.voice_active():
-                raw_angle = doa_reader.read_angle()
+            if await asyncio.to_thread(doa_reader.voice_active):
+                raw_angle = await asyncio.to_thread(doa_reader.read_angle)
                 if raw_angle is not None:
                     source = "voice"
                     break
             await asyncio.sleep(0.1)
     if raw_angle is None:
-        raw_angle = doa_reader.read_angle()
+        raw_angle = await asyncio.to_thread(doa_reader.read_angle)
     if raw_angle is None:
         logger.debug("DOA read returned None — skipping rotation (%s)", label)
         return
@@ -319,6 +433,7 @@ async def _run_legacy_loop(
 
 
 async def run(config: AppConfig) -> None:
+    _install_runtime_thread_pool()
     state("BOOT", f"robot_id={config.robot_id}", backend=config.backend.base_url)
     await _report_hardware()
 
@@ -357,21 +472,10 @@ async def run(config: AppConfig) -> None:
         pulse_sink=config.audio_output.pulse_sink,
     )
 
-    _safe_open("Nextion", nextion.open)
-    _safe_open("Arduino", arduino.open)
-
-    if config.audio_output.auto_connect:
-        connected = await audio_output.ensure_bluetooth()
-        if connected:
-            state("READY", f"Bluetooth speaker {config.audio_output.bluetooth_mac}")
-        else:
-            warn("Bluetooth speaker unavailable — falling back to default sink")
+    await _open_adapters_parallel(nextion, arduino)
 
     backend = BackendClient(config.backend.base_url, config.backend.timeout_seconds)
-    await backend.start()
-
-    if not await backend.health():
-        warn("Backend health probe failed (continuing — may recover)")
+    await _connect_audio_and_probe_backend(audio_output, backend, config)
 
     display = DisplayService(nextion)
     rotation_calib = RotationCalibration(
@@ -388,19 +492,6 @@ async def run(config: AppConfig) -> None:
     audio = AudioService(respeaker, config.respeaker.record_seconds)
 
     doa_reader = DOAReader()
-    if config.rotation.enabled:
-        if doa_reader.start():
-            logger.info(
-                "Rotation auto vers le locuteur activée (slope=%.1f°/s, offset=%.1f°, "
-                "front=%.1f°, invert=%s, LUT=%d points)",
-                rotation_calib.slope_deg_per_s, rotation_calib.offset_deg,
-                rotation_calib.front_offset_deg, rotation_calib.invert_direction,
-                len(rotation_calib.lut),
-            )
-        else:
-            logger.warning("DOA reader unavailable — rotation toward speaker disabled")
-    else:
-        logger.info("Rotation auto désactivée (ROTATION_ENABLED=0)")
     speech = SpeechService(backend, audio_output, config.backend.voice_name)
 
     listener = ContinuousListenerService(
@@ -455,16 +546,22 @@ async def run(config: AppConfig) -> None:
     )
 
     wake_word = _build_wake_word_service(config, audio, backend, respeaker)
-    if wake_word is not None:
+    if False and wake_word is not None:
         try:
             await wake_word.prepare()
         except Exception:
             logger.exception("Wake-word engine prepare() failed; continuing — engine may self-heal")
 
-    if nextion.is_open:
-        await display.resume_idle()
-    if arduino.is_open:
-        await _safe_async("motion.hello (greeting)", motion.hello())
+    await _prepare_startup_services(
+        wake_word=wake_word,
+        display=display,
+        motion=motion,
+        nextion=nextion,
+        arduino=arduino,
+        doa_reader=doa_reader,
+        config=config,
+        rotation_calib=rotation_calib,
+    )
 
     state("READY", "KODA online")
 
