@@ -1,6 +1,6 @@
 // initialiser environnement
 source .venv/bin/activate
-python -m app.main
+:
 
 deactivate
 // Threads runtime (optionnel)

@@ -129,32 +129,6 @@ async def _open_adapters_parallel(
     )
 
 
-async def _connect_audio_and_probe_backend(
-    audio_output: AudioOutputAdapter,
-    backend: BackendClient,
-    config: AppConfig,
-) -> None:
-    async def _ensure_bluetooth() -> bool:
-        if not config.audio_output.auto_connect:
-            return True
-        connected = await audio_output.ensure_bluetooth()
-        if connected:
-            state("READY", f"Bluetooth speaker {config.audio_output.bluetooth_mac}")
-        else:
-            warn("Bluetooth speaker unavailable -- falling back to default sink")
-        return connected
-
-    async def _health_probe() -> bool:
-        ok = await backend.health()
-        if not ok:
-            warn("Backend health probe failed (continuing -- may recover)")
-        return ok
-
-    await backend.start()
-    state("BOOT", "probing backend and audio output in parallel")
-    await asyncio.gather(_ensure_bluetooth(), _health_probe())
-
-
 async def _prepare_doa_reader(
     doa_reader: DOAReader,
     config: AppConfig,
@@ -167,18 +141,20 @@ async def _prepare_doa_reader(
     started = await asyncio.to_thread(doa_reader.start)
     if started:
         logger.info(
-            "Rotation auto vers le locuteur activÃ©e (slope=%.1fÂ°/s, offset=%.1fÂ°, "
-            "front=%.1fÂ°, invert=%s, LUT=%d points)",
+            "Rotation auto vers le locuteur activée (slope=%.1f°/s, offset=%.1f°, "
+            "front=%.1f°, invert=%s, LUT=%d points)",
             rotation_calib.slope_deg_per_s, rotation_calib.offset_deg,
             rotation_calib.front_offset_deg, rotation_calib.invert_direction,
             len(rotation_calib.lut),
         )
     else:
-        logger.warning("DOA reader unavailable -- rotation toward speaker disabled")
+        logger.warning("DOA reader unavailable — rotation toward speaker disabled")
 
 
-async def _prepare_startup_services(
+async def _bootstrap_in_parallel(
     *,
+    audio_output: AudioOutputAdapter,
+    backend: BackendClient,
     wake_word: Optional[WakeWordService],
     display: DisplayService,
     motion: MotionService,
@@ -188,10 +164,43 @@ async def _prepare_startup_services(
     config: AppConfig,
     rotation_calib: RotationCalibration,
 ) -> None:
-    tasks: list[asyncio.Task] = [
-        asyncio.create_task(_prepare_doa_reader(doa_reader, config, rotation_calib))
-    ]
+    """Run every independent startup step concurrently.
 
+    Dependency chain:
+      1. `backend.start()` — instant (just builds an httpx.AsyncClient), but the
+         health probe needs it, so we await it before the gather.
+      2. Everything else has **no inter-dependency** and runs in one big
+         `asyncio.gather`:
+           - Bluetooth speaker connect      (5-15s — was the worst sequential cost)
+           - Backend /health probe          (0.1-0.5s)
+           - Vosk wake-word model load      (~8s on Pi 4)
+           - DOA reader USB init            (~0.1s)
+           - Display idle frame             (~0.05s UART)
+           - Motion hello servo greeting    (~0.05s + servo travel)
+      3. The slowest task (usually BT or Vosk) sets the total boot duration —
+         the others piggy-back for free.
+    """
+    await backend.start()
+
+    async def _bluetooth_task() -> None:
+        if not config.audio_output.auto_connect:
+            return
+        connected = await audio_output.ensure_bluetooth()
+        if connected:
+            state("READY", f"Bluetooth speaker {config.audio_output.bluetooth_mac}")
+        else:
+            warn("Bluetooth speaker unavailable -- falling back to default sink")
+
+    async def _health_task() -> None:
+        ok = await backend.health()
+        if not ok:
+            warn("Backend health probe failed (continuing -- may recover)")
+
+    tasks: list[asyncio.Task] = [
+        asyncio.create_task(_bluetooth_task()),
+        asyncio.create_task(_health_task()),
+        asyncio.create_task(_prepare_doa_reader(doa_reader, config, rotation_calib)),
+    ]
     if wake_word is not None:
         tasks.append(asyncio.create_task(
             _safe_async("wake_word.prepare", wake_word.prepare())
@@ -205,7 +214,7 @@ async def _prepare_startup_services(
             _safe_async("motion.hello (greeting)", motion.hello())
         ))
 
-    state("BOOT", f"preparing {len(tasks)} startup services in parallel")
+    state("BOOT", f"bootstrapping {len(tasks)} services in parallel")
     await asyncio.gather(*tasks, return_exceptions=False)
 
 
@@ -475,7 +484,6 @@ async def run(config: AppConfig) -> None:
     await _open_adapters_parallel(nextion, arduino)
 
     backend = BackendClient(config.backend.base_url, config.backend.timeout_seconds)
-    await _connect_audio_and_probe_backend(audio_output, backend, config)
 
     display = DisplayService(nextion)
     rotation_calib = RotationCalibration(
@@ -546,13 +554,12 @@ async def run(config: AppConfig) -> None:
     )
 
     wake_word = _build_wake_word_service(config, audio, backend, respeaker)
-    if False and wake_word is not None:
-        try:
-            await wake_word.prepare()
-        except Exception:
-            logger.exception("Wake-word engine prepare() failed; continuing — engine may self-heal")
-
-    await _prepare_startup_services(
+    # Single bootstrap gather: backend.start + bluetooth + health probe + Vosk
+    # model load + DOA init + display + motion all run concurrently. The
+    # slowest task (bluetooth ~5-15s OR Vosk ~8s on Pi 4) sets the total cost.
+    await _bootstrap_in_parallel(
+        audio_output=audio_output,
+        backend=backend,
         wake_word=wake_word,
         display=display,
         motion=motion,
