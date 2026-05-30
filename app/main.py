@@ -42,6 +42,11 @@ try:
 except Exception:  # pragma: no cover — vosk not installed during early dev
     VoskWakeWordEngine = None  # type: ignore[assignment]
 
+try:
+    from services.wake_word.hybrid_wake_word_engine import HybridWakeWordEngine
+except Exception:  # pragma: no cover — websockets not installed yet
+    HybridWakeWordEngine = None  # type: ignore[assignment]
+
 logger = get_logger(__name__)
 
 
@@ -249,17 +254,38 @@ def _build_wake_word_service(
     engine = None
     if config.vosk.language and VoskWakeWordEngine is not None:
         try:
-            engine = VoskWakeWordEngine(
-                respeaker=respeaker,
-                matcher=matcher,
-                language=config.vosk.language,
-                models_dir=config.vosk.models_dir,
-                chunk_bytes=config.vosk.chunk_bytes,
-                auto_download=config.vosk.auto_download,
-            )
-            logger.info("Wake-word engine: Vosk streaming (language=%s)", config.vosk.language)
+            if config.hybrid_wake_word.enabled and HybridWakeWordEngine is not None:
+                engine = HybridWakeWordEngine(
+                    respeaker=respeaker,
+                    matcher=matcher,
+                    language=config.vosk.language,
+                    models_dir=config.vosk.models_dir,
+                    chunk_bytes=config.vosk.chunk_bytes,
+                    auto_download=config.vosk.auto_download,
+                    backend_base_url=config.backend.base_url,
+                    robot_id=config.robot_id,
+                    awaiting_timeout_s=config.hybrid_wake_word.awaiting_timeout_s,
+                    azure_language=config.hybrid_wake_word.azure_language or None,
+                )
+                logger.info(
+                    "Wake-word engine: HYBRID (Vosk gate + Azure WS race, "
+                    "vosk=%s, azure_lang=%s, awaiting=%.1fs)",
+                    config.vosk.language,
+                    config.hybrid_wake_word.azure_language or "<auto>",
+                    config.hybrid_wake_word.awaiting_timeout_s,
+                )
+            else:
+                engine = VoskWakeWordEngine(
+                    respeaker=respeaker,
+                    matcher=matcher,
+                    language=config.vosk.language,
+                    models_dir=config.vosk.models_dir,
+                    chunk_bytes=config.vosk.chunk_bytes,
+                    auto_download=config.vosk.auto_download,
+                )
+                logger.info("Wake-word engine: Vosk streaming (language=%s)", config.vosk.language)
         except Exception:
-            logger.exception("Failed to construct Vosk engine; falling back to legacy chunk mode")
+            logger.exception("Failed to construct wake-word engine; falling back to legacy chunk mode")
             engine = None
     else:
         logger.warning(

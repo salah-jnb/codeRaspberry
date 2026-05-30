@@ -125,6 +125,17 @@ class VoskConfig:
 
 
 @dataclass(frozen=True)
+class HybridWakeWordConfig:
+    """Hybrid Vosk (sleep gate) + Azure WS (race) wake-word recogniser."""
+    # If False, fall back to pure Vosk (the previous default).
+    enabled: bool = False
+    # How long we keep Azure WS open after Vosk wakes the gate.
+    awaiting_timeout_s: float = 6.0
+    # Locale Azure uses on its side. Empty = derive from vosk language.
+    azure_language: str = ""
+
+
+@dataclass(frozen=True)
 class ListenerConfigEntry:
     max_seconds: float = 15.0
     silence_duration_seconds: float = 1.5
@@ -187,6 +198,7 @@ class AppConfig:
     rotation: RotationConfig = field(default_factory=RotationConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     face_recognition: FaceRecognitionConfig = field(default_factory=FaceRecognitionConfig)
+    hybrid_wake_word: HybridWakeWordConfig = field(default_factory=HybridWakeWordConfig)
 
 
 def load_config() -> AppConfig:
@@ -270,6 +282,11 @@ def load_config() -> AppConfig:
         cache_seconds=_env_float("FACE_RECOGNITION_CACHE_SECONDS", 60.0),
         fallback_name=_env_str("FACE_RECOGNITION_FALLBACK", "inconnu"),
     )
+    hybrid_wake_word = HybridWakeWordConfig(
+        enabled=_env_str("HYBRID_WAKE_WORD_ENABLED", "0") in {"1", "true", "yes"},
+        awaiting_timeout_s=_env_float("HYBRID_AWAITING_TIMEOUT_S", 6.0),
+        azure_language=_env_str("HYBRID_AZURE_LANGUAGE", ""),
+    )
     return AppConfig(
         robot_id=_env_str("ROBOT_ID", "koda-01"),
         log_level=_env_str("LOG_LEVEL", "INFO"),
@@ -285,6 +302,7 @@ def load_config() -> AppConfig:
         rotation=rotation,
         camera=camera,
         face_recognition=face_recognition,
+        hybrid_wake_word=hybrid_wake_word,
     )
 
 
