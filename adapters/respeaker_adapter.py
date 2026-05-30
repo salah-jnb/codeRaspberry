@@ -84,14 +84,30 @@ class RespeakerAdapter:
 
         `output_type` is sox's `-t` flag for output (e.g. "raw", "wav").
         `output_target` is a file path or "-" for stdout.
+
+        CRITICAL: explicit output-side ``-c 1`` is required. On the Pi OS sox
+        build, omitting it causes ``remix`` to be silently ignored on
+        ``-t raw -`` output — sox dumps all N native channels interleaved and
+        the consumer (Vosk / Azure WS) reads garbage at N× real-time speed.
+        Validated on 2026-05-30: without ``-c 1`` on output, 234 chunks of
+        "audio" in 10s instead of 40, no STT match. With ``-c 1`` on output:
+        40 chunks in 10s, Azure matches "محسن" in 2.6 s. See
+        ``tests/test_ws_wake_word.py`` for the diagnostic.
         """
+        bit_depth = str(self._bit_depth())
         cmd: List[str] = [
-            "sox",
-            "-q",
+            "sox", "-q",
+            # Input side
             "-t", "alsa", self._device,
             "-r", str(self._sample_rate),
             "-c", str(self._native_channels),
-            "-b", str(self._bit_depth()),
+            "-b", bit_depth,
+            "-e", "signed-integer",
+            # Output side — MUST repeat -c/-r/-b/-e or sox keeps the input's
+            # 6 channels in the output stream and `remix` becomes a no-op.
+            "-c", "1",
+            "-r", str(self._sample_rate),
+            "-b", bit_depth,
             "-e", "signed-integer",
             "-t", output_type,
         ]
