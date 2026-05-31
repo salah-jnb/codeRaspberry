@@ -12,6 +12,59 @@ from utils.subprocess_registry import track_subprocess, untrack_subprocess
 logger = get_logger(__name__)
 
 
+async def _kill_capture_proc(proc: asyncio.subprocess.Process) -> None:
+    """Terminate a sox/arecord capture process aggressively.
+
+    Order of operations:
+      1. SIGTERM the process (polite)
+      2. Wait 800ms — sox usually flushes its stderr + exits here
+      3. SIGKILL the entire process group (sox may have helper threads/forks)
+      4. Wait another 1.5s for the kernel to actually reap it (USB driver
+         can hold the ALSA buffer release for a moment)
+      5. If still alive, log loudly and give up — the registry's
+         kill_tracked_subprocesses() will get it at shutdown.
+    """
+    import os
+    import signal
+
+    if proc.returncode is not None:
+        return
+
+    # Step 1+2: polite SIGTERM
+    try:
+        proc.terminate()
+    except (ProcessLookupError, OSError):
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=0.8)
+        return
+    except asyncio.TimeoutError:
+        pass
+
+    # Step 3: SIGKILL the WHOLE process group (catches sox helper threads).
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        # Fallback: SIGKILL just the parent
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            return
+
+    # Step 4: wait for the kernel to actually reap the process. ALSA capture
+    # processes in uninterruptible sleep (D state) on USB I/O can take a
+    # noticeable moment to clear after SIGKILL.
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=1.5)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "capture refused to die after SIGKILL (process group %s) — "
+            "USB likely stuck in D state; subprocess will be cleaned at shutdown",
+            proc.pid,
+        )
+
+
 class RespeakerAdapter:
     """Capture audio from the ReSpeaker 4-Mic USB array.
 
@@ -197,10 +250,17 @@ class RespeakerAdapter:
                 "ON" if self._needs_remix else "OFF (single-channel firmware)",
             )
 
+            # start_new_session=True puts sox/arecord in its own process group
+            # so we can later send SIGKILL to the WHOLE group (killpg) — needed
+            # because sox can spawn helper threads / subprocesses that ignore
+            # signals to just the parent. Without this, a stuck USB read leaves
+            # an unkillable orphan that holds plughw:3,0 for the next capture.
+            import os
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
             track_subprocess(proc, label=f"respeaker.stream_pcm({cmd[0]})")
             assert proc.stdout is not None
@@ -220,19 +280,13 @@ class RespeakerAdapter:
                 yield data
         finally:
             if proc is not None and proc.returncode is None:
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    try:
-                        await asyncio.wait_for(proc.wait(), timeout=1.0)
-                    except asyncio.TimeoutError:
-                        logger.warning(
-                            "%s refused to die after SIGKILL — leaking subprocess pid=%s",
-                            "capture", proc.pid,
-                        )
+                await _kill_capture_proc(proc)
             untrack_subprocess(proc)
+            # Small grace so the kernel actually releases plughw:3,0 before
+            # the next consumer (ContinuousListenerService) opens it. Without
+            # this, the next sox often gets ALSA EBUSY or captures silence
+            # because the USB endpoint state hasn't fully reset.
+            await asyncio.sleep(0.25)
             try:
                 self._lock.release()
             except RuntimeError:

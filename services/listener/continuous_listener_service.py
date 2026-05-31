@@ -108,6 +108,20 @@ class ContinuousListenerService:
             data = out_path.read_bytes()
             if not data:
                 raise RuntimeError("sox produced an empty WAV")
+            # A WAV header alone is ~44 bytes — anything smaller than that
+            # plus a tiny fraction of audio means the capture device was
+            # busy/silent (typical after a leaked sox from a previous turn
+            # holds plughw:3,0). Treat as "no speech captured" and let the
+            # caller skip the turn cleanly instead of sending 44 bytes of
+            # nothing to Azure STT.
+            min_speech_bytes = 44 + int(
+                self._adapter_sample_rate() * 2 * cfg.min_speech_seconds * 0.5
+            )
+            if len(data) < min_speech_bytes:
+                raise RuntimeError(
+                    f"sox produced only {len(data)} bytes (<{min_speech_bytes} expected); "
+                    "capture device was likely busy or silent — aborting turn"
+                )
             return data
         finally:
             try:
