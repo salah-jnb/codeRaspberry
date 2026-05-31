@@ -32,6 +32,7 @@ from services.motion.motion_service import (
 from services.speech.speech_service import SpeechService
 from services.vision.face_recognition_service import FaceRecognitionService
 from services.wake_word.default_keywords import DEFAULT_KEYWORDS
+from utils.subprocess_registry import kill_tracked_subprocesses, pkill_orphans
 from services.wake_word.wake_word_matcher import WakeWordMatcher
 from services.wake_word.wake_word_service import WakeWordService
 from utils.logger import get_logger
@@ -220,7 +221,17 @@ async def _bootstrap_in_parallel(
         ))
 
     state("BOOT", f"bootstrapping {len(tasks)} services in parallel")
-    await asyncio.gather(*tasks, return_exceptions=False)
+    # return_exceptions=True: one failed startup task (Bluetooth, health
+    # probe, display, etc.) MUST NOT abort the others — we want to boot in
+    # degraded mode rather than refuse to start at all. Each task's outcome
+    # is logged individually below.
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for task, result in zip(tasks, results):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "Bootstrap task %r failed: %s — continuing in degraded mode",
+                task.get_name(), result,
+            )
 
 
 async def _shutdown(
@@ -234,6 +245,14 @@ async def _shutdown(
     await _safe_async("display.set_expression(SLEEPING)", display.set_expression(Expression.SLEEPING))
     if arduino.is_open:
         await _safe_async("motion.stop", motion.stop())
+    # Cleanup any subprocess we leaked (sox/arecord/rpicam/yt-dlp) so they
+    # don't keep holding the USB endpoint or the camera busy after exit.
+    await _safe_async("kill_tracked_subprocesses", kill_tracked_subprocesses())
+    # Belt-and-suspenders: also pkill orphans by name in case some were
+    # spawned by code paths that don't use track_subprocess().
+    killed = pkill_orphans()
+    if killed:
+        logger.info("Shutdown: pkill matched %d orphan binaries", killed)
     await _safe_async("backend.close", backend.close())
     await _safe_to_thread("nextion.close", nextion.close)
     await _safe_to_thread("arduino.close", arduino.close)
@@ -368,75 +387,113 @@ async def _run_wake_word_loop(
     greeting_text = config.conversation.greeting_text or "أهلا بيك"
 
     while not stop_event.is_set():
-        state("PASSIVE", f"{len(wake_word._matcher.keywords)} keywords")
-        match = await wake_word.wait_for_wake(stop_event)
-        if match is None:
-            return
-
-        state("WAKE", match.keyword)
-
-        # ── Parallel kickoff: visuel + rotation + greeting + face-reco (FAF) ──
-        # Aucune dépendance entre eux. La rotation tourne pendant que le greeting
-        # parle, et la face-reco se cache en background pour le 1er tour.
-        async def _greet():
-            if greeting_text:
-                await speech.speak(greeting_text)
-
-        rotate_task: Optional[asyncio.Task] = None
-        if doa_reader is not None and doa_reader.available and config.rotation.enabled:
-            rotate_task = asyncio.create_task(_rotate_toward_speaker(
-                doa_reader, motion, config, label="wake", wait_for_voice_s=0.0,
-            ))
-        if face_recognition is not None:
-            face_recognition.fire_and_forget_refresh()
-
-        await asyncio.gather(
-            display.set_expression(Expression.SURPRISED),
-            _greet(),
-            return_exceptions=True,
-        )
-        # Ensure rotation is finished before opening the mic (motor noise would
-        # poison the VAD threshold).
-        if rotate_task is not None:
-            try:
-                await rotate_task
-            except Exception:
-                logger.exception("rotation task failed")
-
-        # ── Listen immediately — no second rotation pass ──
-        state("ACTIVE")
-        await _safe_async("display.set_expression(THINKING)",
-                          display.set_expression(Expression.THINKING))
-        await conversation.listen_and_answer()
-
-        # ── Follow-up turns ──
-        consecutive_silences = 0
-        max_silences = max(0, config.conversation.max_active_silences)
-        while not stop_event.is_set() and consecutive_silences < max_silences:
-            try:
-                await asyncio.wait_for(
-                    stop_event.wait(),
-                    timeout=config.conversation.inter_turn_pause_seconds,
-                )
-                return
-            except asyncio.TimeoutError:
-                pass
-
-            state("ACTIVE", f"follow-up {consecutive_silences + 1}/{max_silences}")
-            # Re-orient toward the speaker — but only briefly poll voice so the
-            # user doesn't wait if they speak right away.
-            await _rotate_toward_speaker(
-                doa_reader, motion, config, label="follow", wait_for_voice_s=1.5,
+        try:
+            await _wake_word_iteration(
+                wake_word, conversation, display, motion, speech, config,
+                stop_event, doa_reader, face_recognition, greeting_text,
             )
-            had_speech = await _run_active_turn(conversation)
-            if had_speech:
-                consecutive_silences = 0
-            else:
-                consecutive_silences += 1
-                state("SILENCE", f"{consecutive_silences}/{max_silences}")
+        except asyncio.CancelledError:
+            # Normal shutdown path (signal handler) — propagate.
+            raise
+        except Exception:
+            # Anything else (Vosk crash, Azure WS reset, USB disconnect mid-turn,
+            # subprocess died, etc.) MUST NOT kill the loop. Log and back off
+            # so we don't hot-spin if the failure is permanent.
+            logger.exception("Wake-word loop iteration crashed — restarting in 2 s")
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=2.0)
+                return  # shutdown requested during the back-off
+            except asyncio.TimeoutError:
+                continue
 
-        state("SLEEP")
-        await _safe_async("display.resume_idle", display.resume_idle())
+
+async def _wake_word_iteration(
+    wake_word: WakeWordService,
+    conversation: ConversationService,
+    display: DisplayService,
+    motion: MotionService,
+    speech: SpeechService,
+    config: AppConfig,
+    stop_event: asyncio.Event,
+    doa_reader: Optional[DOAReader],
+    face_recognition: Optional[FaceRecognitionService],
+    greeting_text: str,
+) -> None:
+    """One wake → greet → answer → follow-ups → back-to-sleep cycle.
+
+    Extracted from the main loop so the outer try/except can restart cleanly
+    after any failure (Vosk crash, Azure timeout, motor jam, etc.) without
+    re-importing the world.
+    """
+    state("PASSIVE", f"{len(wake_word._matcher.keywords)} keywords")
+    match = await wake_word.wait_for_wake(stop_event)
+    if match is None:
+        return
+
+    state("WAKE", match.keyword)
+
+    # ── Parallel kickoff: visuel + rotation + greeting + face-reco (FAF) ──
+    # Aucune dépendance entre eux. La rotation tourne pendant que le greeting
+    # parle, et la face-reco se cache en background pour le 1er tour.
+    async def _greet():
+        if greeting_text:
+            await speech.speak(greeting_text)
+
+    rotate_task: Optional[asyncio.Task] = None
+    if doa_reader is not None and doa_reader.available and config.rotation.enabled:
+        rotate_task = asyncio.create_task(_rotate_toward_speaker(
+            doa_reader, motion, config, label="wake", wait_for_voice_s=0.0,
+        ))
+    if face_recognition is not None:
+        face_recognition.fire_and_forget_refresh()
+
+    await asyncio.gather(
+        display.set_expression(Expression.SURPRISED),
+        _greet(),
+        return_exceptions=True,
+    )
+    # Ensure rotation is finished before opening the mic (motor noise would
+    # poison the VAD threshold).
+    if rotate_task is not None:
+        try:
+            await rotate_task
+        except Exception:
+            logger.exception("rotation task failed")
+
+    # ── Listen immediately — no second rotation pass ──
+    state("ACTIVE")
+    await _safe_async("display.set_expression(THINKING)",
+                      display.set_expression(Expression.THINKING))
+    await conversation.listen_and_answer()
+
+    # ── Follow-up turns ──
+    consecutive_silences = 0
+    max_silences = max(0, config.conversation.max_active_silences)
+    while not stop_event.is_set() and consecutive_silences < max_silences:
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=config.conversation.inter_turn_pause_seconds,
+            )
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        state("ACTIVE", f"follow-up {consecutive_silences + 1}/{max_silences}")
+        # Re-orient toward the speaker — but only briefly poll voice so the
+        # user doesn't wait if they speak right away.
+        await _rotate_toward_speaker(
+            doa_reader, motion, config, label="follow", wait_for_voice_s=1.5,
+        )
+        had_speech = await _run_active_turn(conversation)
+        if had_speech:
+            consecutive_silences = 0
+        else:
+            consecutive_silences += 1
+            state("SILENCE", f"{consecutive_silences}/{max_silences}")
+
+    state("SLEEP")
+    await _safe_async("display.resume_idle", display.resume_idle())
 
 
 async def _run_active_turn(conversation: ConversationService) -> bool:

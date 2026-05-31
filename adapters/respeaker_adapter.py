@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import AsyncIterator, List, Optional
 
 from utils.logger import get_logger
+from utils.subprocess_registry import track_subprocess, untrack_subprocess
 
 logger = get_logger(__name__)
 
@@ -201,6 +202,7 @@ class RespeakerAdapter:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            track_subprocess(proc, label=f"respeaker.stream_pcm({cmd[0]})")
             assert proc.stdout is not None
             while True:
                 try:
@@ -230,6 +232,7 @@ class RespeakerAdapter:
                             "%s refused to die after SIGKILL — leaking subprocess pid=%s",
                             "capture", proc.pid,
                         )
+            untrack_subprocess(proc)
             try:
                 self._lock.release()
             except RuntimeError:

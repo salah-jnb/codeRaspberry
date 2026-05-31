@@ -10,6 +10,26 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+class ArduinoSendError(RuntimeError):
+    """Raised when a motor/servo command could not be delivered to the Arduino.
+    Callers can decide whether to retry, degrade or warn the user."""
+
+    def __init__(self, command: ArduinoCommand, cause: BaseException) -> None:
+        super().__init__(f"Arduino command {command.name} failed: {cause!s}")
+        self.command = command
+        self.cause = cause
+
+
+@dataclass(frozen=True)
+class MotionResult:
+    """Outcome of a motion call. ``ok=False`` means the command did not reach
+    the Arduino (USB unplug, write timeout, etc.) — caller can re-issue or
+    fall back to a safe state."""
+    ok: bool
+    command: ArduinoCommand
+    error: Optional[str] = None
+
+
 @dataclass(frozen=True)
 class RotationCalibration:
     """Open-loop rotation timing model.
@@ -80,18 +100,44 @@ class MotionService:
         rotation_calibration: Optional[RotationCalibration] = None,
     ) -> None:
         self._adapter = adapter
+        # Serializes ARDUINO WRITES only — held briefly per byte. NEVER hold
+        # this lock across an asyncio.sleep (rotate_by_angle would otherwise
+        # block hello/stop/expression for the full rotation duration).
         self._lock = asyncio.Lock()
         self._rotation = rotation_calibration or RotationCalibration()
+        # Signalled by callers (e.g. emergency STOP) to abort the inter-pulse
+        # sleep of `rotate_by_angle`. set() => the sleep returns immediately
+        # and the STOP command is issued without waiting for the deadline.
+        self._abort_event = asyncio.Event()
 
     async def _send(self, command: ArduinoCommand) -> str:
+        """Send a single Arduino command. Raises ArduinoSendError on failure
+        so callers can decide what to do (previously: silently returned "")."""
         async with self._lock:
             try:
                 ack = await asyncio.to_thread(self._adapter.send, command)
                 logger.debug("Arduino %s -> %s", command.name, ack)
                 return ack
-            except Exception:
+            except Exception as exc:
                 logger.exception("Arduino command %s failed", command.name)
-                return ""
+                raise ArduinoSendError(command, exc) from exc
+
+    async def _try_send(self, command: ArduinoCommand) -> MotionResult:
+        """Same as `_send` but never raises — useful for cleanup paths."""
+        try:
+            ack = await self._send(command)
+            return MotionResult(ok=True, command=command, error=ack or None)
+        except ArduinoSendError as exc:
+            return MotionResult(ok=False, command=command, error=str(exc.cause)[:200])
+
+    def request_abort(self) -> None:
+        """Interrupt any in-flight ``rotate_by_angle`` sleep — used for an
+        emergency STOP (low battery, obstacle detected, user said 'stop').
+
+        Safe to call from any task, including outside the event loop (the
+        Event.set is thread-safe). The next time rotate_by_angle's sleep
+        wakes, it will immediately issue STOP."""
+        self._abort_event.set()
 
     async def hello(self) -> None:
         await self._send(ArduinoCommand.HELLO)
@@ -132,12 +178,19 @@ class MotionService:
     async def status(self) -> str:
         return await self._send(ArduinoCommand.STATUS)
 
-    async def rotate_by_angle(self, signed_angle_deg: float) -> None:
+    async def rotate_by_angle(self, signed_angle_deg: float) -> MotionResult:
         """Rotate the chassis by a signed angle (positive=right/CW, negative=left/CCW).
 
         Open-loop timing: the duration comes from the linear model or the LUT in
-        the active `RotationCalibration`. Below the deadband nothing is sent —
-        we don't burn battery on imperceptible 1° corrections.
+        the active `RotationCalibration`. Below the deadband nothing is sent.
+
+        IMPORTANT: the lock is acquired only for each *single* serial write
+        (direction + STOP) and is RELEASED during the ``asyncio.sleep`` that
+        spans the rotation. This lets other commands (motion.hello, emergency
+        stop, expression change) interleave without waiting 3-5 s.
+
+        ``self._abort_event`` can be set by any caller to cut the sleep short
+        and issue STOP immediately (emergency abort path).
         """
         calib = self._rotation
         if abs(signed_angle_deg) < calib.deadband_deg:
@@ -145,7 +198,7 @@ class MotionService:
                 "rotate_by_angle: |%.1f°| < deadband %.1f° — skipping",
                 signed_angle_deg, calib.deadband_deg,
             )
-            return
+            return MotionResult(ok=True, command=ArduinoCommand.STOP, error="below deadband")
         direction = ArduinoCommand.RIGHT if signed_angle_deg > 0 else ArduinoCommand.LEFT
         duration = calib.duration_for(abs(signed_angle_deg))
         logger.info(
@@ -153,15 +206,30 @@ class MotionService:
             direction.name, signed_angle_deg, duration,
             "LUT" if calib.lut else f"linear slope={calib.slope_deg_per_s} offset={calib.offset_deg}",
         )
-        async with self._lock:
-            try:
-                await asyncio.to_thread(self._adapter.send, direction)
-                await asyncio.sleep(duration)
-                await asyncio.to_thread(self._adapter.send, ArduinoCommand.STOP)
-            except Exception:
-                logger.exception("rotate_by_angle: motor command failed")
-                try:
-                    await asyncio.to_thread(self._adapter.send, ArduinoCommand.STOP)
-                except Exception:
-                    pass
+
+        # Reset abort flag at the start of each rotation so a stale set() from
+        # a previous turn doesn't immediately cancel this one.
+        self._abort_event.clear()
+
+        # Step 1 — send direction command (LOCK held for ~1 ms, the serial write)
+        start_result = await self._try_send(direction)
+        if not start_result.ok:
+            return start_result
+
+        # Step 2 — sleep OUTSIDE the lock. Any other Arduino command can run
+        # during this window. The abort_event interrupts the sleep early.
+        try:
+            await asyncio.wait_for(self._abort_event.wait(), timeout=duration)
+            logger.info("rotate_by_angle: aborted by request_abort() after partial rotation")
+        except asyncio.TimeoutError:
+            pass  # normal completion — duration elapsed
+
+        # Step 3 — send STOP (always, even if abort fired)
+        stop_result = await self._try_send(ArduinoCommand.STOP)
+
+        # Step 4 — settle wait (also outside lock; the robot decelerates)
         await asyncio.sleep(calib.settle_s)
+
+        if not stop_result.ok:
+            return stop_result
+        return MotionResult(ok=True, command=direction)
