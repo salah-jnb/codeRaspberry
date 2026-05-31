@@ -53,18 +53,24 @@ class ContinuousListenerService:
         native_ch = self._adapter_native_channels()
         processed_idx = self._adapter_processed_channel()
         # Capture the firmware's native channel count, then `remix N` keeps ONLY
-        # the DSP-processed channel (ch0 by default). This is what fixes the
-        # "ALSA averages 6 channels into 1" dilution that was destroying VAD
-        # sensitivity AND Azure STT accuracy on noisy clips.
+        # the DSP-processed channel (ch0 by default). CRITICAL: on Pi OS sox,
+        # `remix` is silently ignored unless the OUTPUT side also declares
+        # `-c 1` — without it, all native channels are kept in the WAV and the
+        # backend Azure STT receives multi-channel garbage. See
+        # memory/project_sox_remix_raw_bug.md.
+        sr = str(self._adapter_sample_rate())
         cmd = [
-            "sox",
-            "-q",
+            "sox", "-q",
+            # Input side
             "-t", "alsa", self._adapter_device(),
-            "-r", str(self._adapter_sample_rate()),
+            "-r", sr,
             "-c", str(native_ch),
             "-b", "16",
-            "-t", "wav", str(out_path),
         ]
+        if native_ch > 1:
+            # Re-declare format on output side to force sox to actually apply remix.
+            cmd += ["-c", "1", "-r", sr, "-b", "16", "-e", "signed-integer"]
+        cmd += ["-t", "wav", str(out_path)]
         if native_ch > 1:
             cmd += ["remix", str(processed_idx + 1)]  # sox is 1-indexed
         cmd += [

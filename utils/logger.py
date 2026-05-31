@@ -33,10 +33,15 @@ def _short_module(name: str) -> str:
 
 
 class _CompactFormatter(logging.Formatter):
-    """`HH:MM:SS <module7> <msg>` — no level/date noise. Level shows as emoji
-    only when severity is high enough to warrant it."""
+    """`HH:MM:SS.ms <module7> <msg>` — no level/date noise. Millisecond precision
+    is essential for measuring latency between WAKE / GREET / ACTIVE / response
+    arrival. Set LOG_FORMAT=verbose for the full format with date + level.
+    """
 
     def format(self, record: logging.LogRecord) -> str:
+        # logging.LogRecord.created is a float epoch with µs precision; we keep
+        # 3 digits of fractional seconds (millis) to avoid noise.
+        ms = int((record.created - int(record.created)) * 1000)
         ts = self.formatTime(record, "%H:%M:%S")
         mod = _short_module(record.name)
         prefix = ""
@@ -44,7 +49,7 @@ class _CompactFormatter(logging.Formatter):
             prefix = "❌ "
         elif record.levelno >= logging.WARNING:
             prefix = "⚠️  "
-        return f"{ts} {mod:<7s} {prefix}{record.getMessage()}"
+        return f"{ts}.{ms:03d} {mod:<7s} {prefix}{record.getMessage()}"
 
 
 def get_logger(name: str) -> logging.Logger:

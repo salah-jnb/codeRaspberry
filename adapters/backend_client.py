@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -88,12 +89,40 @@ class BackendClient:
             logger.debug("Backend health probe failed: %s", exc)
             return False
 
+    async def health_with_retry(self, attempts: int = 3, base_delay_s: float = 1.0) -> bool:
+        """Health probe with exponential backoff. Used at boot — if backend is
+        still starting up (uvicorn cold start, Azure SDK warming, Supabase
+        connection), a single probe at t=0 will miss it. With 3 attempts at
+        1 / 2 / 4 s, we tolerate ~7 s of backend start-up before declaring
+        degraded mode."""
+        import asyncio as _asyncio
+        delay = base_delay_s
+        for attempt in range(1, attempts + 1):
+            if await self.health():
+                if attempt > 1:
+                    logger.info("Backend healthy after %d attempt(s)", attempt)
+                return True
+            if attempt < attempts:
+                logger.info(
+                    "Backend health probe attempt %d/%d failed, retrying in %.1fs…",
+                    attempt, attempts, delay,
+                )
+                await _asyncio.sleep(delay)
+                delay *= 2
+        logger.warning(
+            "Backend health probe failed after %d attempts — continuing in degraded mode",
+            attempts,
+        )
+        return False
+
     async def text_to_speech(self, text: str, voice_name: Optional[str] = None) -> bytes:
         client = self._require()
         payload: dict[str, str] = {"text": text}
         if voice_name:
             payload["voice_name"] = voice_name
-        response = await client.post("/api/audio/text-to-speech", json=payload)
+        # Greeting/short reply — 15 s ceiling so a stuck backend doesn't freeze
+        # the wake-word ack flow for the full default 120 s timeout.
+        response = await client.post("/api/audio/text-to-speech", json=payload, timeout=15.0)
         response.raise_for_status()
         return response.content
 
@@ -101,7 +130,8 @@ class BackendClient:
         client = self._require()
         logger.info("→ POST /api/audio/speech-to-text  wav=%d bytes", len(wav_bytes))
         files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
-        response = await client.post("/api/audio/speech-to-text", files=files)
+        # Azure STT one-shot — long questions can take 8-12 s; cap at 30 s.
+        response = await client.post("/api/audio/speech-to-text", files=files, timeout=30.0)
         logger.info(
             "← STT response status=%d type=%s body=%s",
             response.status_code,
@@ -171,10 +201,15 @@ class BackendClient:
             "→ POST /api/audio/speech-to-action  wav=%d bytes  form=%s",
             len(wav_bytes), data or "{}",
         )
+        # Full STT + n8n + TTS pipeline. With backend N8N_TIMEOUT_S=30 + Azure
+        # STT ~10s + TTS ~3s, normal upper bound ≈ 50 s. We cap at 90 s as a
+        # safety net — beyond that, the backend is clearly hung and the user
+        # is better off with a clear failure than another minute of silence.
         response = await client.post(
             "/api/audio/speech-to-action",
             files=files,
             data=data,
+            timeout=90.0,
         )
         if response.status_code >= 400:
             logger.error(
@@ -194,20 +229,34 @@ class BackendClient:
         )
         return result
 
-    async def identify_face(self, jpg_bytes: bytes) -> str:
+    async def identify_face(self, jpg_bytes: bytes, *, timeout_s: float = 30.0) -> str:
         """POST a JPEG to /api/identify-face and return the matched name.
 
         Returns "inconnu" on any error so the conversation never blocks because
-        the camera or backend hiccupped.
+        the camera or backend hiccupped. Timeout defaults to 30 s — face
+        recognition is CPU-bound on the backend (HOG model + N comparisons)
+        and was previously cut at 15 s during concurrent wake-word bursts.
         """
         if not jpg_bytes:
             return "inconnu"
         client = self._require()
         files = {"file": ("capture.jpg", jpg_bytes, "image/jpeg")}
+        t0 = time.perf_counter()
         try:
-            response = await client.post("/api/identify-face", files=files, timeout=15.0)
+            response = await client.post("/api/identify-face", files=files, timeout=timeout_s)
+        except httpx.TimeoutException as exc:
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            logger.warning(
+                "identify_face TIMEOUT after %dms (limit=%.0fs): %s",
+                elapsed_ms, timeout_s, exc.__class__.__name__,
+            )
+            return "inconnu"
         except httpx.HTTPError as exc:
-            logger.warning("identify_face network error: %s", exc)
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            logger.warning(
+                "identify_face network error after %dms: %s %s",
+                elapsed_ms, exc.__class__.__name__, exc,
+            )
             return "inconnu"
         if response.status_code != 200:
             logger.warning(
@@ -220,6 +269,8 @@ class BackendClient:
         except ValueError:
             return "inconnu"
         name = (body.get("nom") if isinstance(body, dict) else None) or "inconnu"
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        logger.info("identify_face OK in %dms → %r", elapsed_ms, name)
         return str(name).strip() or "inconnu"
 
     async def trigger_n8n(self, message: str) -> dict:

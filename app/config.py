@@ -99,7 +99,12 @@ class ConversationConfig:
     listen_seconds: float = 5.0
     inter_turn_pause_seconds: float = 0.5
     play_gesture_during_speech: bool = True
-    max_active_silences: int = 3
+    # How many consecutive silent follow-up turns before we return to passive
+    # wake-word listening. 2 means: user has ~2 quiet windows to keep the
+    # conversation alive; if they leave the room, robot sleeps faster than
+    # the old default of 3 (which wasted ~10 s of motors + face_id roundtrips
+    # on an empty room).
+    max_active_silences: int = 2
     greeting_text: str = "أهلا بيك"
 
 

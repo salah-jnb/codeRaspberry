@@ -197,9 +197,9 @@ async def _bootstrap_in_parallel(
             warn("Bluetooth speaker unavailable -- falling back to default sink")
 
     async def _health_task() -> None:
-        ok = await backend.health()
-        if not ok:
-            warn("Backend health probe failed (continuing -- may recover)")
+        # 3 attempts × exp backoff (1s, 2s, 4s) — covers uvicorn cold start
+        # and gives us a clear "degraded mode" log if the backend really is down.
+        await backend.health_with_retry(attempts=3, base_delay_s=1.0)
 
     tasks: list[asyncio.Task] = [
         asyncio.create_task(_bluetooth_task()),
