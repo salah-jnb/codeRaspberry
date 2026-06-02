@@ -50,9 +50,15 @@ class ActionResult:
 class BackendClient:
     """Async HTTP client for the FastAPI Distributeur (voice pipeline, STT/TTS, n8n)."""
 
-    def __init__(self, base_url: str, timeout_seconds: float = 60.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: float = 60.0,
+        face_api_base_url: Optional[str] = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout_seconds
+        self._face_api_base_url = face_api_base_url.rstrip("/") if face_api_base_url else None
         self._client: Optional[httpx.AsyncClient] = None
 
     async def start(self) -> None:
@@ -240,10 +246,16 @@ class BackendClient:
         if not jpg_bytes:
             return "inconnu"
         client = self._require()
+        url = (
+            f"{self._face_api_base_url}/api/identify-face"
+            if self._face_api_base_url
+            else "/api/identify-face"
+        )
         files = {"file": ("capture.jpg", jpg_bytes, "image/jpeg")}
         t0 = time.perf_counter()
         try:
-            response = await client.post("/api/identify-face", files=files, timeout=timeout_s)
+            logger.info("-> POST %s  jpg=%d bytes", url, len(jpg_bytes))
+            response = await client.post(url, files=files, timeout=timeout_s)
         except httpx.TimeoutException as exc:
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             logger.warning(

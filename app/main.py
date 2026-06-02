@@ -240,8 +240,12 @@ async def _shutdown(
     arduino: ArduinoAdapter,
     display: DisplayService,
     motion: MotionService,
+    face_recognition: Optional[FaceRecognitionService] = None,
 ) -> None:
     state("SHUTDOWN", "stopping all adapters")
+    if face_recognition is not None:
+        await _safe_async("face_recognition.cancel_pending_refresh",
+                          face_recognition.cancel_pending_refresh())
     await _safe_async("display.set_expression(SLEEPING)", display.set_expression(Expression.SLEEPING))
     if arduino.is_open:
         await _safe_async("motion.stop", motion.stop())
@@ -566,7 +570,11 @@ async def run(config: AppConfig) -> None:
 
     await _open_adapters_parallel(nextion, arduino)
 
-    backend = BackendClient(config.backend.base_url, config.backend.timeout_seconds)
+    backend = BackendClient(
+        config.backend.base_url,
+        config.backend.timeout_seconds,
+        face_api_base_url=config.face_recognition.api_base_url,
+    )
 
     display = DisplayService(nextion)
     rotation_calib = RotationCalibration(
@@ -606,6 +614,12 @@ async def run(config: AppConfig) -> None:
             width=config.camera.width,
             height=config.camera.height,
             capture_timeout_ms=config.camera.capture_timeout_ms,
+            prefer_mjpeg=config.camera.prefer_mjpeg,
+            mjpeg_url=config.camera.mjpeg_url,
+            mjpeg_timeout_s=config.camera.mjpeg_timeout_s,
+            stream_width=config.camera.stream_width,
+            stream_height=config.camera.stream_height,
+            stream_fps=config.camera.stream_fps,
         )
         face_recognition = FaceRecognitionService(
             camera=camera,
@@ -669,7 +683,7 @@ async def run(config: AppConfig) -> None:
         else:
             await _run_legacy_loop(conversation, config, stop_event)
     finally:
-        await _shutdown(backend, nextion, arduino, display, motion)
+        await _shutdown(backend, nextion, arduino, display, motion, face_recognition)
 
 
 def main() -> None:

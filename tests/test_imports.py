@@ -9,6 +9,7 @@ MODULES = (
     "adapters.arduino_adapter",
     "adapters.audio_output_adapter",
     "adapters.backend_client",
+    "adapters.camera_adapter",
     "adapters.nextion_adapter",
     "adapters.respeaker_adapter",
     "core.event_bus",

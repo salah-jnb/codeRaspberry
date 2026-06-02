@@ -154,6 +154,12 @@ class CameraConfig:
     width: int = 1280
     height: int = 720
     capture_timeout_ms: int = 500
+    prefer_mjpeg: bool = True
+    mjpeg_url: Optional[str] = None
+    mjpeg_timeout_s: float = 4.0
+    stream_width: int = 640
+    stream_height: int = 480
+    stream_fps: int = 10
 
 
 @dataclass(frozen=True)
@@ -163,6 +169,8 @@ class FaceRecognitionConfig:
     cache_seconds: float = 60.0
     # Fallback when no face is detected / camera fails.
     fallback_name: str = "inconnu"
+    # Optional dedicated face API base URL. If empty, BACKEND_URL is used.
+    api_base_url: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -281,11 +289,18 @@ def load_config() -> AppConfig:
         width=_env_int("CAMERA_WIDTH", 1280),
         height=_env_int("CAMERA_HEIGHT", 720),
         capture_timeout_ms=_env_int("CAMERA_CAPTURE_TIMEOUT_MS", 500),
+        prefer_mjpeg=_env_str("CAMERA_PREFER_MJPEG", "1") not in {"0", "false", "no"},
+        mjpeg_url=_env_optional("CAMERA_MJPEG_URL") or _env_optional("FACE_CAMERA_MJPEG_URL"),
+        mjpeg_timeout_s=_env_float("CAMERA_MJPEG_TIMEOUT_S", 4.0),
+        stream_width=_env_int("CAMERA_STREAM_WIDTH", 640),
+        stream_height=_env_int("CAMERA_STREAM_HEIGHT", 480),
+        stream_fps=_env_int("CAMERA_STREAM_FPS", 10),
     )
     face_recognition = FaceRecognitionConfig(
         enabled=_env_str("FACE_RECOGNITION_ENABLED", "1") not in {"0", "false", "no"},
         cache_seconds=_env_float("FACE_RECOGNITION_CACHE_SECONDS", 60.0),
         fallback_name=_env_str("FACE_RECOGNITION_FALLBACK", "inconnu"),
+        api_base_url=_env_optional("FACE_API_BASE") or _env_optional("FACE_RECOGNITION_API_BASE"),
     )
     hybrid_wake_word = HybridWakeWordConfig(
         enabled=_env_str("HYBRID_WAKE_WORD_ENABLED", "0") in {"1", "true", "yes"},
