@@ -10,7 +10,7 @@ _PREFIXES = (
     "BACKEND_", "RESPEAKER_", "BLUETOOTH_", "NEXTION_", "ARDUINO_",
     "LISTEN_", "INTER_TURN_", "GESTURE_", "WAKE_WORD_", "LISTENER_",
     "MAX_ACTIVE_", "ROBOT_ID", "LOG_LEVEL", "PULSE_SINK", "CAMERA_", "FACE_",
-    "TOUCH_",
+    "TOUCH_", "HYBRID_", "VOSK_",
 )
 
 
@@ -54,7 +54,7 @@ def test_env_override(monkeypatch):
     monkeypatch.setenv("FACE_API_BASE", "http://10.0.0.5:8765")
     monkeypatch.setenv("CAMERA_MJPEG_URL", "http://127.0.0.1:5000/video_feed")
     monkeypatch.setenv("TOUCH_SENSOR_ENABLED", "0")
-    monkeypatch.setenv("TOUCH_SENSOR_PIN", "22")
+    monkeypatch.setenv("TOUCH_SENSOR_PINS", "17,27")
     monkeypatch.setenv("TOUCH_LAUGH_WAV", "/tmp/laugh.wav")
     monkeypatch.setenv("WAKE_WORD_KEYWORDS", "koda, مرحبا , hey ")
 
@@ -68,6 +68,7 @@ def test_env_override(monkeypatch):
     assert config.face_recognition.api_base_url == "http://10.0.0.5:8765"
     assert config.camera.mjpeg_url == "http://127.0.0.1:5000/video_feed"
     assert config.touch.enabled is False
-    assert config.touch.pin == 22
+    assert config.touch.pins == (17, 27)
+    assert config.touch.pin == 17
     assert config.touch.laugh_wav_path == "/tmp/laugh.wav"
     assert config.wake_word.keywords == ("koda", "مرحبا", "hey")

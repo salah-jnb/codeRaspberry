@@ -62,11 +62,13 @@ class AzureStreamingWakeWordClient:
         *,
         path: str = "/api/ws/wake-word",
         connect_timeout_s: float = 5.0,
+        log_partials: bool = False,
     ) -> None:
         self._url = f"{_http_to_ws(backend_base_url, path)}/{robot_id}"
         self._language = language
         self._keywords = list(keywords)
         self._connect_timeout = connect_timeout_s
+        self._log_partials = log_partials
         self._ws = None  # set in start()
         self._match: Optional[StreamingWakeMatch] = None
         self._wake_event = asyncio.Event()
@@ -74,6 +76,8 @@ class AzureStreamingWakeWordClient:
         self._reader_task: Optional[asyncio.Task] = None
         self._writer_task: Optional[asyncio.Task] = None
         self._closed = False
+        self._chunks_sent = 0
+        self._bytes_sent = 0
 
     @property
     def matched(self) -> Optional[StreamingWakeMatch]:
@@ -96,6 +100,7 @@ class AzureStreamingWakeWordClient:
 
         config = {"language": self._language, "keywords": self._keywords}
         await self._ws.send(json.dumps(config, ensure_ascii=False))
+        logger.info("Wake-word stream: sent config %s", config)
 
         self._reader_task = asyncio.create_task(self._reader_loop(), name="azure_ws_reader")
         self._writer_task = asyncio.create_task(self._writer_loop(audio_iter), name="azure_ws_writer")
@@ -129,6 +134,13 @@ class AzureStreamingWakeWordClient:
             with contextlib.suppress(BaseException):
                 await self._ws.close()
         self._ws = None
+        if self._chunks_sent or self._bytes_sent:
+            logger.info(
+                "Wake-word stream: sent %d chunks (%d bytes = %.1fs of mono PCM)",
+                self._chunks_sent,
+                self._bytes_sent,
+                self._bytes_sent / 32000.0,
+            )
 
     async def _reader_loop(self) -> None:
         assert self._ws is not None
@@ -143,6 +155,7 @@ class AzureStreamingWakeWordClient:
                     continue
                 event = payload.get("event")
                 if event == "ready":
+                    logger.info("Wake-word stream: ready (Azure recognizer started)")
                     self._ready_event.set()
                 elif event == "wake_detected":
                     self._match = StreamingWakeMatch(
@@ -161,7 +174,12 @@ class AzureStreamingWakeWordClient:
                 elif event == "error":
                     logger.warning("Wake-word stream backend error: %s", payload.get("message"))
                 elif event == "partial":
-                    logger.debug("Azure partial: %r", payload.get("text", "")[:80])
+                    text = str(payload.get("text") or "")
+                    latency_ms = int(payload.get("latency_ms") or 0)
+                    if self._log_partials:
+                        logger.info("Azure partial(%dms): %r", latency_ms, text[:120])
+                    else:
+                        logger.debug("Azure partial(%dms): %r", latency_ms, text[:80])
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -176,7 +194,14 @@ class AzureStreamingWakeWordClient:
                 if self._wake_event.is_set() or self._closed:
                     return
                 await self._ws.send(chunk)
+                self._chunks_sent += 1
+                self._bytes_sent += len(chunk)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Wake-word stream writer crashed")
+        finally:
+            aclose = getattr(audio_iter, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(BaseException):
+                    await aclose()

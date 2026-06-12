@@ -192,8 +192,10 @@ class HybridWakeWordEngine:
                 if vosk_match and vosk_match.matched:
                     logger.info("🎯 Vosk wake match: keyword=%r in %r", vosk_match.keyword, text[:80])
                     return WakeMatch(
+                        matched=True,
                         keyword=vosk_match.keyword,
-                        transcript=text,
+                        raw_text=text,
+                        normalized_text=vosk_match.normalized_text,
                         remainder="",
                     )
 
@@ -202,8 +204,10 @@ class HybridWakeWordEngine:
                     m = azure_client.matched
                     logger.info("🎯 Azure wake match wins (%dms, %s): %r", m.latency_ms, m.source, m.transcript[:80])
                     return WakeMatch(
+                        matched=True,
                         keyword=m.keyword,
-                        transcript=m.transcript,
+                        raw_text=m.transcript,
+                        normalized_text=self._matcher.match(m.transcript).normalized_text,
                         remainder="",
                     )
 

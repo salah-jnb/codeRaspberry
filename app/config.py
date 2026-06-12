@@ -47,6 +47,24 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
+def _env_int_tuple(key: str, default: tuple[int, ...]) -> tuple[int, ...]:
+    value = os.environ.get(key)
+    if not value or not value.strip():
+        return default
+    pins: list[int] = []
+    for raw in value.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            pin = int(raw)
+        except ValueError:
+            continue
+        if pin not in pins:
+            pins.append(pin)
+    return tuple(pins) or default
+
+
 @dataclass(frozen=True)
 class BackendConfig:
     base_url: str = "http://SALAH_DESKTOP.local:8000"
@@ -141,10 +159,16 @@ class HybridWakeWordConfig:
     """Hybrid Vosk (sleep gate) + Azure WS (race) wake-word recogniser."""
     # If False, fall back to pure Vosk (the previous default).
     enabled: bool = False
+    # "direct" mirrors tests/test_ws_wake_word.py: WS is opened immediately
+    # and Azure receives the ReSpeaker stream continuously. "gate" keeps the
+    # older Vosk-gated mode.
+    mode: str = "direct"
     # How long we keep Azure WS open after Vosk wakes the gate.
     awaiting_timeout_s: float = 6.0
     # Locale Azure uses on its side. Empty = derive from vosk language.
     azure_language: str = ""
+    # Print backend partial hypotheses at INFO, like the smoke-test script.
+    log_partials: bool = True
 
 
 @dataclass(frozen=True)
@@ -183,13 +207,17 @@ class FaceRecognitionConfig:
 @dataclass(frozen=True)
 class TouchConfig:
     enabled: bool = True
-    pin: int = 17
+    pins: tuple[int, ...] = (17,)
     active_high: bool = True
     pull_up: bool = False
     bounce_seconds: float = 0.15
     cooldown_seconds: float = 2.0
     laugh_text: str = "hahaha"
     laugh_wav_path: Optional[str] = None
+
+    @property
+    def pin(self) -> int:
+        return self.pins[0]
 
 
 @dataclass(frozen=True)
@@ -326,7 +354,7 @@ def load_config() -> AppConfig:
     )
     touch = TouchConfig(
         enabled=_env_str("TOUCH_SENSOR_ENABLED", "1") not in {"0", "false", "no"},
-        pin=_env_int("TOUCH_SENSOR_PIN", 17),
+        pins=_env_int_tuple("TOUCH_SENSOR_PINS", (_env_int("TOUCH_SENSOR_PIN", 17),)),
         active_high=_env_str("TOUCH_SENSOR_ACTIVE_HIGH", "1") not in {"0", "false", "no"},
         pull_up=_env_str("TOUCH_SENSOR_PULL_UP", "0") in {"1", "true", "yes"},
         bounce_seconds=_env_float("TOUCH_SENSOR_BOUNCE_SECONDS", 0.15),
@@ -336,8 +364,10 @@ def load_config() -> AppConfig:
     )
     hybrid_wake_word = HybridWakeWordConfig(
         enabled=_env_str("HYBRID_WAKE_WORD_ENABLED", "0") in {"1", "true", "yes"},
+        mode=_env_str("HYBRID_WAKE_WORD_MODE", "direct").lower(),
         awaiting_timeout_s=_env_float("HYBRID_AWAITING_TIMEOUT_S", 6.0),
         azure_language=_env_str("HYBRID_AZURE_LANGUAGE", ""),
+        log_partials=_env_str("WAKE_WORD_WS_LOG_PARTIALS", "1") not in {"0", "false", "no"},
     )
     return AppConfig(
         robot_id=_env_str("ROBOT_ID", "koda-01"),

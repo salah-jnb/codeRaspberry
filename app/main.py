@@ -46,6 +46,11 @@ except Exception:  # pragma: no cover — vosk not installed during early dev
     VoskWakeWordEngine = None  # type: ignore[assignment]
 
 try:
+    from services.wake_word.backend_ws_engine import BackendWsWakeWordEngine
+except Exception:  # pragma: no cover
+    BackendWsWakeWordEngine = None  # type: ignore[assignment]
+
+try:
     from services.wake_word.hybrid_wake_word_engine import HybridWakeWordEngine
 except Exception:  # pragma: no cover — websockets not installed yet
     HybridWakeWordEngine = None  # type: ignore[assignment]
@@ -277,6 +282,37 @@ def _build_wake_word_service(
     matcher = WakeWordMatcher(list(keywords))
 
     engine = None
+    if config.hybrid_wake_word.enabled and config.hybrid_wake_word.mode in {
+        "direct", "ws", "backend_ws", "azure",
+    }:
+        if BackendWsWakeWordEngine is not None:
+            engine = BackendWsWakeWordEngine(
+                respeaker=respeaker,
+                matcher=matcher,
+                language=config.hybrid_wake_word.azure_language or config.vosk.language or "ar-SA",
+                keywords=keywords,
+                backend_base_url=config.backend.base_url,
+                robot_id=config.robot_id,
+                chunk_bytes=config.vosk.chunk_bytes,
+                log_partials=config.hybrid_wake_word.log_partials,
+            )
+            logger.info(
+                "Wake-word engine: BACKEND-WS direct (Azure streaming, lang=%s, keywords=%d, chunk=%d)",
+                config.hybrid_wake_word.azure_language or config.vosk.language or "ar-SA",
+                len(keywords),
+                config.vosk.chunk_bytes,
+            )
+        else:
+            logger.warning("Backend WS wake-word engine unavailable; falling back")
+        return WakeWordService(
+            audio=audio,
+            backend=backend,
+            matcher=matcher,
+            chunk_seconds=config.wake_word.chunk_seconds,
+            cooldown_seconds=config.wake_word.cooldown_seconds,
+            engine=engine,
+        )
+
     if config.vosk.language and VoskWakeWordEngine is not None:
         try:
             if config.hybrid_wake_word.enabled and HybridWakeWordEngine is not None:
@@ -921,7 +957,7 @@ async def run(config: AppConfig) -> None:
 
     touch = TouchSensorService(
         enabled=config.touch.enabled,
-        pin=config.touch.pin,
+        pins=config.touch.pins,
         active_high=config.touch.active_high,
         pull_up=config.touch.pull_up,
         bounce_seconds=config.touch.bounce_seconds,
