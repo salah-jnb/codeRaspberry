@@ -235,6 +235,58 @@ class BackendClient:
         )
         return result
 
+    async def greet_by_name(
+        self,
+        nom: str,
+        *,
+        voice_name: Optional[str] = None,
+        timeout_s: float = 60.0,
+    ) -> ActionResult:
+        """POST /api/webhook/nom — démarrer une conversation par nom.
+
+        Utilisé par la boucle Pi après 5 minutes de silence : le robot a
+        reconnu la personne devant lui (ou ``inconnu``) et demande au
+        backend de produire une accroche vocale.
+
+        Le backend renvoie le même shape JSON que ``speech_to_action`` (action,
+        spoken_text, audio_b64, ...), donc on réutilise ``ActionResult.from_json``
+        et le dispatcher existant côté Pi.
+        """
+        client = self._require()
+        body = {"nom": (nom or "inconnu").strip() or "inconnu"}
+        if voice_name:
+            body["voice_name"] = voice_name
+        logger.info("→ POST /api/webhook/nom  body=%s  (timeout=%.0fs)", body, timeout_s)
+        t0 = time.perf_counter()
+        try:
+            response = await client.post(
+                "/api/webhook/nom",
+                json=body,
+                timeout=timeout_s,
+            )
+        except httpx.TimeoutException as exc:
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            logger.warning(
+                "greet_by_name TIMEOUT after %dms (limit=%.0fs): %s",
+                elapsed_ms, timeout_s, exc.__class__.__name__,
+            )
+            raise
+        if response.status_code >= 400:
+            logger.error(
+                "← greet error status=%d body=%s",
+                response.status_code, response.text[:500],
+            )
+        response.raise_for_status()
+        payload = response.json()
+        result = ActionResult.from_json(payload)
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        logger.info(
+            "← greet OK in %dms  action=%s  spoken=%r  audio=%d bytes",
+            elapsed_ms, result.action,
+            result.spoken_text[:120], len(result.audio_wav),
+        )
+        return result
+
     async def identify_face(self, jpg_bytes: bytes, *, timeout_s: float = 30.0) -> str:
         """POST a JPEG to /api/identify-face and return the matched name.
 

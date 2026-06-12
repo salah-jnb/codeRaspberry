@@ -127,6 +127,44 @@ class ArduinoAdapter:
 
         return line.decode("ascii", errors="replace").strip()
 
+    def send_line(self, text: str, *, read_timeout_s: float = 8.0) -> str:
+        """Send a multi-character command terminated by ``\\n`` and read one
+        response line back from the Arduino.
+
+        Used for the extended rotation protocol (e.g. ``L045``, ``R180``) where
+        the firmware blocks until the gyro integration reaches the target angle
+        and then sends ``DONE:<actual>\\n`` (or ``ERR:<reason>\\n``).
+
+        ``read_timeout_s`` overrides the serial port's default read timeout
+        for the duration of this call — closed-loop rotation can take up to
+        ~6 s on a 180° turn, so we bump the timeout above the usual 2 s.
+        """
+        if not self.is_open:
+            raise RuntimeError("Arduino adapter not opened")
+        if not text or "\n" in text or "\r" in text:
+            raise ValueError("send_line text must be non-empty and contain no newline")
+
+        with self._lock:
+            assert self._serial is not None
+            previous_timeout = self._serial.timeout
+            try:
+                self._flush_buffers(self._serial)
+                self._serial.write((text + "\n").encode("ascii"))
+                self._serial.flush()
+                self._serial.timeout = read_timeout_s
+                line = self._serial.readline()
+            except (SerialException, OSError) as exc:
+                raise RuntimeError(f"Arduino I/O failed: {exc}") from exc
+            finally:
+                # Always restore the original read timeout so subsequent
+                # single-byte sends behave as the user configured them.
+                try:
+                    self._serial.timeout = previous_timeout
+                except (SerialException, OSError):
+                    pass
+
+        return line.decode("ascii", errors="replace").strip()
+
     def _candidate_ports(self) -> Iterable[str]:
         if self._configured_port:
             return (self._configured_port,)

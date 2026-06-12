@@ -115,6 +115,36 @@ class ConversationService:
         finally:
             await self._display.resume_idle()
 
+    async def passive_greet(self) -> None:
+        """Démarrer une conversation après une longue période d'inactivité.
+
+        Identifie le visage en face (ou ``"inconnu"``) puis appelle
+        ``POST /api/webhook/nom`` côté backend, qui passe par le 2e workflow
+        n8n et renvoie un ``ActionResult`` de type ``text`` (audio TTS
+        embarqué). On le rejoue via le dispatcher existant.
+        """
+        name = "inconnu"
+        if self._face_recognition is not None:
+            try:
+                identified = await self._face_recognition.identify()
+                if identified and identified.strip():
+                    name = identified.strip()
+            except Exception:
+                logger.exception("Face reco failed during passive greet — using 'inconnu'")
+
+        logger.info("👋 Passive greet — appel /api/webhook/nom avec nom=%r", name)
+        await self._display.set_expression(Expression.THINKING)
+        try:
+            result = await self._backend.greet_by_name(name, voice_name=self._voice_name)
+        except Exception:
+            logger.exception("Passive greet backend call failed — abandon")
+            await self._flash_expression(Expression.SAD)
+            return
+
+        # On réutilise le dispatcher existant — `action` est typiquement `text`,
+        # mais si n8n décide autre chose (musique d'ambiance par ex.) on gère.
+        await self._dispatch_action(result)
+
     async def _resolve_extra_text(self) -> Optional[str]:
         """Decide what to put between parentheses after the STT result.
 

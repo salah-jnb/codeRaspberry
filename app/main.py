@@ -4,6 +4,7 @@ import asyncio
 import os
 import signal
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
@@ -30,6 +31,7 @@ from services.motion.motion_service import (
     shortest_signed_angle,
 )
 from services.speech.speech_service import SpeechService
+from services.touch.touch_sensor_service import TouchSensorService
 from services.vision.face_recognition_service import FaceRecognitionService
 from services.wake_word.default_keywords import DEFAULT_KEYWORDS
 from utils.subprocess_registry import kill_tracked_subprocesses, pkill_orphans
@@ -411,6 +413,55 @@ async def _run_wake_word_loop(
                 continue
 
 
+async def _wait_for_wake_or_passive_greet(
+    wake_word: WakeWordService,
+    conversation: ConversationService,
+    config: AppConfig,
+    stop_event: asyncio.Event,
+):
+    """Attendre un mot de réveil, mais aussi déclencher ``passive_greet`` après
+    ``passive_greet_interval_s`` secondes d'inactivité.
+
+    Si la course est gagnée par le timer, on appelle ``conversation.passive_greet()``
+    (face-id → /api/webhook/nom → TTS) puis on relance la course. Si c'est le
+    wake-word qui gagne (ou ``stop_event``), on retourne sa valeur immédiatement.
+
+    Reste rétro-compatible : si ``passive_greet_enabled=False``, on tombe sur
+    l'appel direct à ``wait_for_wake`` (zéro overhead).
+    """
+    if not config.conversation.passive_greet_enabled:
+        return await wake_word.wait_for_wake(stop_event)
+
+    interval_s = max(30.0, float(config.conversation.passive_greet_interval_s))
+    while not stop_event.is_set():
+        wake_task = asyncio.create_task(
+            wake_word.wait_for_wake(stop_event), name="wake-wait",
+        )
+        idle_task = asyncio.create_task(asyncio.sleep(interval_s), name="passive-greet-idle")
+        done, pending = await asyncio.wait(
+            {wake_task, idle_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        if wake_task in done:
+            return wake_task.result()
+
+        # Idle a gagné → démarrer une conversation autonome puis recommencer.
+        state("PASSIVE-GREET", f"{interval_s:.0f}s idle — bonjour autonome")
+        try:
+            await conversation.passive_greet()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("passive_greet failed — back to passive listening")
+
+
 async def _wake_word_iteration(
     wake_word: WakeWordService,
     conversation: ConversationService,
@@ -430,7 +481,9 @@ async def _wake_word_iteration(
     re-importing the world.
     """
     state("PASSIVE", f"{len(wake_word._matcher.keywords)} keywords")
-    match = await wake_word.wait_for_wake(stop_event)
+    match = await _wait_for_wake_or_passive_greet(
+        wake_word, conversation, config, stop_event,
+    )
     if match is None:
         return
 
@@ -526,6 +579,195 @@ async def _run_legacy_loop(
             return
         except asyncio.TimeoutError:
             continue
+
+
+def _create_behavior_task(
+    wake_word: Optional[WakeWordService],
+    conversation: ConversationService,
+    display: DisplayService,
+    motion: MotionService,
+    speech: SpeechService,
+    config: AppConfig,
+    stop_event: asyncio.Event,
+    doa_reader: Optional[DOAReader],
+    face_recognition: Optional[FaceRecognitionService],
+) -> asyncio.Task:
+    if wake_word is not None:
+        return asyncio.create_task(
+            _run_wake_word_loop(
+                wake_word,
+                conversation,
+                display,
+                motion,
+                speech,
+                config,
+                stop_event,
+                doa_reader,
+                face_recognition,
+            ),
+            name="koda-wake-word-loop",
+        )
+    return asyncio.create_task(
+        _run_legacy_loop(conversation, config, stop_event),
+        name="koda-legacy-loop",
+    )
+
+
+async def _cancel_behavior_task(task: asyncio.Task) -> None:
+    if not task.done():
+        task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.exception("Robot behavior task failed while being interrupted")
+
+
+async def _play_tickle_laugh(
+    display: DisplayService,
+    speech: SpeechService,
+    audio_output: AudioOutputAdapter,
+    config: AppConfig,
+) -> None:
+    await _safe_async("display.set_expression(HAPPY)", display.set_expression(Expression.HAPPY))
+    try:
+        wav_path = config.touch.laugh_wav_path
+        if wav_path:
+            path = Path(wav_path).expanduser()
+            if path.exists():
+                await audio_output.play_wav_file(path)
+                return
+            logger.warning("TOUCH_LAUGH_WAV does not exist: %s", path)
+        await speech.speak(config.touch.laugh_text)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Tickle laugh playback failed")
+    finally:
+        await _safe_async("display.resume_idle", display.resume_idle())
+
+
+async def _handle_touch_interrupt(
+    behavior_task: asyncio.Task,
+    display: DisplayService,
+    motion: MotionService,
+    speech: SpeechService,
+    audio_output: AudioOutputAdapter,
+    config: AppConfig,
+) -> None:
+    state("TOUCH", "tickle interrupt")
+    motion.request_abort()
+    behavior_task.cancel()
+
+    await asyncio.gather(
+        _safe_async("audio_output.stop_playback", audio_output.stop_playback()),
+        _safe_async("motion.stop", motion.stop()),
+        return_exceptions=True,
+    )
+    await _cancel_behavior_task(behavior_task)
+    await _safe_async("kill_tracked_subprocesses(touch)", kill_tracked_subprocesses(grace_s=0.25))
+    await _play_tickle_laugh(display, speech, audio_output, config)
+
+
+async def _run_robot_loop_with_touch(
+    *,
+    wake_word: Optional[WakeWordService],
+    conversation: ConversationService,
+    display: DisplayService,
+    motion: MotionService,
+    speech: SpeechService,
+    audio_output: AudioOutputAdapter,
+    config: AppConfig,
+    stop_event: asyncio.Event,
+    doa_reader: Optional[DOAReader],
+    face_recognition: Optional[FaceRecognitionService],
+    touch: TouchSensorService,
+) -> None:
+    touch_event = asyncio.Event()
+
+    def on_touch() -> None:
+        touch_event.set()
+
+    if not touch.start(on_touch):
+        if wake_word is not None:
+            await _run_wake_word_loop(
+                wake_word,
+                conversation,
+                display,
+                motion,
+                speech,
+                config,
+                stop_event,
+                doa_reader,
+                face_recognition,
+            )
+        else:
+            await _run_legacy_loop(conversation, config, stop_event)
+        return
+
+    behavior_task = _create_behavior_task(
+        wake_word,
+        conversation,
+        display,
+        motion,
+        speech,
+        config,
+        stop_event,
+        doa_reader,
+        face_recognition,
+    )
+    stop_task = asyncio.create_task(stop_event.wait(), name="koda-stop-wait")
+
+    try:
+        while not stop_event.is_set():
+            touch_task = asyncio.create_task(touch_event.wait(), name="koda-touch-wait")
+            done, _ = await asyncio.wait(
+                {behavior_task, stop_task, touch_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if touch_task not in done:
+                touch_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await touch_task
+
+            if stop_task in done:
+                break
+
+            if behavior_task in done:
+                await behavior_task
+                break
+
+            if touch_task in done:
+                touch_event.clear()
+                await _handle_touch_interrupt(
+                    behavior_task,
+                    display,
+                    motion,
+                    speech,
+                    audio_output,
+                    config,
+                )
+                if stop_event.is_set():
+                    break
+                behavior_task = _create_behavior_task(
+                    wake_word,
+                    conversation,
+                    display,
+                    motion,
+                    speech,
+                    config,
+                    stop_event,
+                    doa_reader,
+                    face_recognition,
+                )
+    finally:
+        touch.close()
+        stop_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await stop_task
+        if not behavior_task.done():
+            await _cancel_behavior_task(behavior_task)
 
 
 async def run(config: AppConfig) -> None:
@@ -677,11 +919,29 @@ async def run(config: AppConfig) -> None:
         except (NotImplementedError, RuntimeError):
             pass
 
+    touch = TouchSensorService(
+        enabled=config.touch.enabled,
+        pin=config.touch.pin,
+        active_high=config.touch.active_high,
+        pull_up=config.touch.pull_up,
+        bounce_seconds=config.touch.bounce_seconds,
+        cooldown_seconds=config.touch.cooldown_seconds,
+    )
+
     try:
-        if wake_word is not None:
-            await _run_wake_word_loop(wake_word, conversation, display, motion, speech, config, stop_event, doa_reader, face_recognition)
-        else:
-            await _run_legacy_loop(conversation, config, stop_event)
+        await _run_robot_loop_with_touch(
+            wake_word=wake_word,
+            conversation=conversation,
+            display=display,
+            motion=motion,
+            speech=speech,
+            audio_output=audio_output,
+            config=config,
+            stop_event=stop_event,
+            doa_reader=doa_reader,
+            face_recognition=face_recognition,
+            touch=touch,
+        )
     finally:
         await _shutdown(backend, nextion, arduino, display, motion, face_recognition)
 

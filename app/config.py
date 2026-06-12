@@ -106,6 +106,13 @@ class ConversationConfig:
     # on an empty room).
     max_active_silences: int = 2
     greeting_text: str = "أهلا بيك"
+    # Démarrage de conversation autonome après N secondes d'inactivité.
+    # Le robot identifie le visage en face (ou "inconnu") puis appelle
+    # /api/webhook/nom pour obtenir une accroche vocale via n8n.
+    # Désactivable via PASSIVE_GREET_ENABLED=0 ; intervalle réglable via
+    # PASSIVE_GREET_INTERVAL_S (par défaut 300 s = 5 min).
+    passive_greet_enabled: bool = True
+    passive_greet_interval_s: float = 300.0
 
 
 @dataclass(frozen=True)
@@ -174,6 +181,18 @@ class FaceRecognitionConfig:
 
 
 @dataclass(frozen=True)
+class TouchConfig:
+    enabled: bool = True
+    pin: int = 17
+    active_high: bool = True
+    pull_up: bool = False
+    bounce_seconds: float = 0.15
+    cooldown_seconds: float = 2.0
+    laugh_text: str = "hahaha"
+    laugh_wav_path: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class RotationConfig:
     """Open-loop rotation toward the speaker (DOA → motor pulse)."""
     enabled: bool = True
@@ -212,6 +231,7 @@ class AppConfig:
     camera: CameraConfig = field(default_factory=CameraConfig)
     face_recognition: FaceRecognitionConfig = field(default_factory=FaceRecognitionConfig)
     hybrid_wake_word: HybridWakeWordConfig = field(default_factory=HybridWakeWordConfig)
+    touch: TouchConfig = field(default_factory=TouchConfig)
 
 
 def load_config() -> AppConfig:
@@ -253,6 +273,8 @@ def load_config() -> AppConfig:
         play_gesture_during_speech=_env_str("GESTURE_DURING_SPEECH", "1") not in {"0", "false", "no"},
         max_active_silences=_env_int("MAX_ACTIVE_SILENCES", 3),
         greeting_text=_env_str("GREETING_TEXT", "أهلا بيك"),
+        passive_greet_enabled=_env_str("PASSIVE_GREET_ENABLED", "1") not in {"0", "false", "no"},
+        passive_greet_interval_s=_env_float("PASSIVE_GREET_INTERVAL_S", 300.0),
     )
     wake_word = WakeWordConfig(
         enabled=_env_str("WAKE_WORD_ENABLED", "1") not in {"0", "false", "no"},
@@ -302,6 +324,16 @@ def load_config() -> AppConfig:
         fallback_name=_env_str("FACE_RECOGNITION_FALLBACK", "inconnu"),
         api_base_url=_env_optional("FACE_API_BASE") or _env_optional("FACE_RECOGNITION_API_BASE"),
     )
+    touch = TouchConfig(
+        enabled=_env_str("TOUCH_SENSOR_ENABLED", "1") not in {"0", "false", "no"},
+        pin=_env_int("TOUCH_SENSOR_PIN", 17),
+        active_high=_env_str("TOUCH_SENSOR_ACTIVE_HIGH", "1") not in {"0", "false", "no"},
+        pull_up=_env_str("TOUCH_SENSOR_PULL_UP", "0") in {"1", "true", "yes"},
+        bounce_seconds=_env_float("TOUCH_SENSOR_BOUNCE_SECONDS", 0.15),
+        cooldown_seconds=_env_float("TOUCH_SENSOR_COOLDOWN_SECONDS", 2.0),
+        laugh_text=_env_str("TOUCH_LAUGH_TEXT", "hahaha"),
+        laugh_wav_path=_env_optional("TOUCH_LAUGH_WAV"),
+    )
     hybrid_wake_word = HybridWakeWordConfig(
         enabled=_env_str("HYBRID_WAKE_WORD_ENABLED", "0") in {"1", "true", "yes"},
         awaiting_timeout_s=_env_float("HYBRID_AWAITING_TIMEOUT_S", 6.0),
@@ -323,6 +355,7 @@ def load_config() -> AppConfig:
         camera=camera,
         face_recognition=face_recognition,
         hybrid_wake_word=hybrid_wake_word,
+        touch=touch,
     )
 
 

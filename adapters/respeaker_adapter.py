@@ -209,13 +209,21 @@ class RespeakerAdapter:
             tmp = Path(tempfile.mkstemp(suffix=".wav", prefix="koda_in_")[1])
             cmd = self._build_record_cmd(str(tmp), duration_seconds)
             logger.debug("%s %s", cmd[0], " ".join(cmd[1:]))
+            proc: Optional[asyncio.subprocess.Process] = None
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                _, stderr = await proc.communicate()
+                track_subprocess(proc, label=f"respeaker.record({cmd[0]})")
+                try:
+                    _, stderr = await proc.communicate()
+                except asyncio.CancelledError:
+                    await _kill_capture_proc(proc)
+                    raise
+                finally:
+                    untrack_subprocess(proc)
                 if proc.returncode != 0:
                     err = (stderr or b"").decode("utf-8", errors="replace").strip()
                     raise RuntimeError(f"{cmd[0]} failed (code {proc.returncode}): {err}")

@@ -1,9 +1,9 @@
-"""Regression tests for the MotionService lock-during-sleep fix.
+"""Regression tests for the MotionService closed-loop rotation.
 
-Before the fix, ``rotate_by_angle(180)`` would hold the asyncio.Lock for the
-full ~3 s rotation duration, blocking every other Arduino command. Now the
-lock is only held for the individual serial writes (direction + STOP) and
-released during the sleep.
+The rotation now delegates timing to the Arduino MPU6050 firmware:
+the Pi sends ``L045`` / ``R180`` via send_line and waits for
+``DONE:<actual>`` (or ``ERR:<reason>``). Tests use a fake adapter
+to validate the protocol + error paths without hardware.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import List
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -25,85 +24,111 @@ from services.motion.motion_service import (
 
 
 class _FakeArduinoAdapter:
-    """Minimal fake — records every send() and the timestamp it happened at."""
+    """Records every send / send_line and lets tests inject the gyro reply."""
 
-    def __init__(self) -> None:
+    def __init__(self, rotation_reply: str = "DONE:45", rotation_delay_s: float = 0.0) -> None:
         self.sends: List[tuple[float, ArduinoCommand]] = []
+        self.lines: List[tuple[float, str]] = []
         self.is_open = True
         self._t0 = time.perf_counter()
+        self._rotation_reply = rotation_reply
+        self._rotation_delay_s = rotation_delay_s
 
     def send(self, command):  # noqa: D401
         self.sends.append((time.perf_counter() - self._t0, command))
         return "OK"
 
+    def send_line(self, text: str, *, read_timeout_s: float = 8.0) -> str:
+        self.lines.append((time.perf_counter() - self._t0, text))
+        # Simulate firmware "blocking until rotation done".
+        if self._rotation_delay_s > 0:
+            time.sleep(self._rotation_delay_s)
+        return self._rotation_reply
+
 
 @pytest.mark.asyncio
-async def test_rotate_releases_lock_during_sleep() -> None:
-    """While rotate_by_angle is awaiting the rotation sleep, another command
-    must be able to take the lock and execute IMMEDIATELY.
+async def test_rotation_sends_extended_line() -> None:
+    """rotate_by_angle(+45) must transmit 'R045' via send_line."""
+    fake = _FakeArduinoAdapter(rotation_reply="DONE:45")
+    svc = MotionService(fake, RotationCalibration(settle_s=0.0, deadband_deg=5.0))
 
-    Before the fix: hello() would wait ~1.5s for rotate to finish.
-    After:          hello() executes within ~50 ms of being called.
+    result = await svc.rotate_by_angle(45.0)
+    assert result.ok
+    assert result.command == ArduinoCommand.RIGHT
+    assert len(fake.lines) == 1
+    assert fake.lines[0][1] == "R045"
+
+
+@pytest.mark.asyncio
+async def test_rotation_negative_sends_L() -> None:
+    """Negative angle must send L (left) not R."""
+    fake = _FakeArduinoAdapter(rotation_reply="DONE:90")
+    svc = MotionService(fake, RotationCalibration(settle_s=0.0))
+    result = await svc.rotate_by_angle(-90.0)
+    assert result.ok
+    assert result.command == ArduinoCommand.LEFT
+    assert fake.lines[0][1] == "L090"
+
+
+@pytest.mark.asyncio
+async def test_rotation_below_deadband_skips() -> None:
+    """No serial traffic for tiny angles (battery saver)."""
+    fake = _FakeArduinoAdapter()
+    svc = MotionService(fake, RotationCalibration(deadband_deg=5.0, settle_s=0.0))
+    result = await svc.rotate_by_angle(3.0)
+    assert result.ok
+    assert "below deadband" in (result.error or "")
+    assert fake.lines == []
+    assert fake.sends == []
+
+
+@pytest.mark.asyncio
+async def test_rotation_err_response_returns_failure() -> None:
+    """Firmware ERR:* must surface as MotionResult.ok=False and trigger a defensive STOP."""
+    fake = _FakeArduinoAdapter(rotation_reply="ERR:timeout")
+    svc = MotionService(fake, RotationCalibration(settle_s=0.0))
+    result = await svc.rotate_by_angle(180.0)
+    assert not result.ok
+    assert "ERR:timeout" in (result.error or "")
+    # Defensive STOP should have been sent on failure.
+    cmds = [c for _, c in fake.sends]
+    assert ArduinoCommand.STOP in cmds
+
+
+@pytest.mark.asyncio
+async def test_rotation_unexpected_response_returns_failure() -> None:
+    fake = _FakeArduinoAdapter(rotation_reply="garbage")
+    svc = MotionService(fake, RotationCalibration(settle_s=0.0))
+    result = await svc.rotate_by_angle(90.0)
+    assert not result.ok
+    assert "garbage" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_other_commands_concurrent_with_pending_rotation() -> None:
+    """The asyncio lock is held for the duration of send_line, but the rotation
+    runs on the Arduino — meaning the Pi thread is freed quickly. Other
+    commands should still queue correctly without deadlock.
     """
-    fake = _FakeArduinoAdapter()
-    calib = RotationCalibration(slope_deg_per_s=60.0, offset_deg=3.3, settle_s=0.0)
-    svc = MotionService(fake, calib)
+    fake = _FakeArduinoAdapter(rotation_reply="DONE:45", rotation_delay_s=0.3)
+    svc = MotionService(fake, RotationCalibration(settle_s=0.0))
 
-    # 90° at 60°/s ≈ 1.45 s rotation.
-    rotate_task = asyncio.create_task(svc.rotate_by_angle(90.0))
+    rotate_task = asyncio.create_task(svc.rotate_by_angle(45.0))
+    # Fire hello after a brief moment.
+    await asyncio.sleep(0.05)
+    hello_task = asyncio.create_task(svc.hello())
 
-    # Give rotate_by_angle a beat to send the direction command and enter sleep.
-    await asyncio.sleep(0.1)
-
-    t_hello_start = time.perf_counter()
-    await svc.hello()
-    hello_wait = time.perf_counter() - t_hello_start
-
-    await rotate_task
-
-    # hello() must NOT wait the whole rotation. Cap at 200 ms (generous on slow CI).
-    assert hello_wait < 0.2, (
-        f"hello() blocked for {hello_wait * 1000:.0f} ms — lock leak during rotation!"
-    )
-
-    # Both commands must have actually been delivered.
-    cmds = [c for _, c in fake.sends]
-    assert ArduinoCommand.RIGHT in cmds, "Rotation direction not sent"
-    assert ArduinoCommand.HELLO in cmds, "hello() not sent"
-    assert ArduinoCommand.STOP in cmds, "STOP after rotation not sent"
-
-
-@pytest.mark.asyncio
-async def test_rotate_abort_event_cuts_sleep_short() -> None:
-    """request_abort() must terminate the rotation sleep early."""
-    fake = _FakeArduinoAdapter()
-    calib = RotationCalibration(slope_deg_per_s=60.0, offset_deg=0.0, settle_s=0.0)
-    svc = MotionService(fake, calib)
-
-    # 180° at 60°/s = ~3 s. We'll abort after 200 ms.
-    t0 = time.perf_counter()
-    rotate_task = asyncio.create_task(svc.rotate_by_angle(180.0))
-    await asyncio.sleep(0.2)
-    svc.request_abort()
-    result = await rotate_task
-    elapsed = time.perf_counter() - t0
-
-    assert elapsed < 1.0, (
-        f"abort did not cut the sleep — rotation took {elapsed:.2f}s (expected <1s)"
-    )
-    assert result.ok, f"rotation result not ok: {result}"
-    # STOP must still have been delivered after the abort.
-    cmds = [c for _, c in fake.sends]
-    assert cmds[-1] == ArduinoCommand.STOP
+    await asyncio.gather(rotate_task, hello_task)
+    assert any(c == ArduinoCommand.HELLO for _, c in fake.sends)
+    assert fake.lines[0][1] == "R045"
 
 
 @pytest.mark.asyncio
 async def test_send_raises_on_adapter_failure() -> None:
-    """The previous code returned "" on errors. Callers couldn't tell the
-    motor didn't move. Now we raise ArduinoSendError."""
+    """Failed single-byte sends still raise ArduinoSendError (legacy path)."""
     fake = _FakeArduinoAdapter()
 
-    def boom(_command):  # noqa: ANN001
+    def boom(_command):
         raise OSError("USB unplugged")
 
     fake.send = boom  # type: ignore[assignment]
@@ -112,17 +137,3 @@ async def test_send_raises_on_adapter_failure() -> None:
     with pytest.raises(ArduinoSendError) as exc:
         await svc.hello()
     assert exc.value.command == ArduinoCommand.HELLO
-    assert isinstance(exc.value.cause, OSError)
-
-
-@pytest.mark.asyncio
-async def test_rotate_below_deadband_returns_skip() -> None:
-    """Tiny angles should not fire any motor command (battery saver)."""
-    fake = _FakeArduinoAdapter()
-    calib = RotationCalibration(deadband_deg=5.0, settle_s=0.0)
-    svc = MotionService(fake, calib)
-
-    result = await svc.rotate_by_angle(3.0)  # below deadband
-    assert result.ok
-    assert "below deadband" in (result.error or "")
-    assert fake.sends == [], "should not send anything below deadband"

@@ -181,16 +181,23 @@ class MotionService:
     async def rotate_by_angle(self, signed_angle_deg: float) -> MotionResult:
         """Rotate the chassis by a signed angle (positive=right/CW, negative=left/CCW).
 
-        Open-loop timing: the duration comes from the linear model or the LUT in
-        the active `RotationCalibration`. Below the deadband nothing is sent.
+        Uses the MPU6050 closed-loop protocol introduced with the Arduino
+        firmware in ``arduino/koda_arduino.ino``: we send ``L<aaa>\\n`` or
+        ``R<aaa>\\n`` and the Arduino integrates the gyro Z-rate to stop
+        exactly when the target angle is reached. The firmware sends back
+        ``DONE:<actual_deg>\\n`` (success) or ``ERR:<reason>\\n``.
 
-        IMPORTANT: the lock is acquired only for each *single* serial write
-        (direction + STOP) and is RELEASED during the ``asyncio.sleep`` that
-        spans the rotation. This lets other commands (motion.hello, emergency
-        stop, expression change) interleave without waiting 3-5 s.
+        Compared to the previous open-loop timing model (slope + offset), this
+        is robust to battery voltage, floor friction and wheel slip — typical
+        accuracy improves from +-5-10 deg to +-2 deg.
 
-        ``self._abort_event`` can be set by any caller to cut the sleep short
-        and issue STOP immediately (emergency abort path).
+        The single-byte ``S`` (stop) path from other MotionService methods
+        still works for emergency interrupts; the firmware's own 6 s safety
+        timeout protects against runaway rotations if the gyro returns garbage.
+
+        Note: ``self._abort_event`` is kept for API compatibility but is no
+        longer the primary abort mechanism (there is no asyncio.sleep to cut).
+        A touch/STOP from outside can still interrupt by sending the byte ``S``.
         """
         calib = self._rotation
         if abs(signed_angle_deg) < calib.deadband_deg:
@@ -199,37 +206,56 @@ class MotionService:
                 signed_angle_deg, calib.deadband_deg,
             )
             return MotionResult(ok=True, command=ArduinoCommand.STOP, error="below deadband")
-        direction = ArduinoCommand.RIGHT if signed_angle_deg > 0 else ArduinoCommand.LEFT
-        duration = calib.duration_for(abs(signed_angle_deg))
-        logger.info(
-            "🧭 Rotating %s by %.1f° (duration=%.2fs, calib=%s)",
-            direction.name, signed_angle_deg, duration,
-            "LUT" if calib.lut else f"linear slope={calib.slope_deg_per_s} offset={calib.offset_deg}",
-        )
 
-        # Reset abort flag at the start of each rotation so a stale set() from
-        # a previous turn doesn't immediately cancel this one.
+        direction_char = "R" if signed_angle_deg > 0 else "L"
+        direction_cmd = ArduinoCommand.RIGHT if signed_angle_deg > 0 else ArduinoCommand.LEFT
+        target_deg = int(round(min(360.0, abs(signed_angle_deg))))
+        command_str = f"{direction_char}{target_deg:03d}"
+        logger.info(
+            "🧭 Rotating %s by %d° (closed-loop MPU6050, cmd=%r)",
+            direction_char, target_deg, command_str,
+        )
         self._abort_event.clear()
 
-        # Step 1 — send direction command (LOCK held for ~1 ms, the serial write)
-        start_result = await self._try_send(direction)
-        if not start_result.ok:
-            return start_result
+        # Allow ~angle / 30 deg/s + 2 s on top of the firmware's own 6 s safety
+        # timeout. A 180° turn budget is therefore ~8 s.
+        read_timeout_s = max(3.0, target_deg / 30.0 + 2.0)
 
-        # Step 2 — sleep OUTSIDE the lock. Any other Arduino command can run
-        # during this window. The abort_event interrupts the sleep early.
-        try:
-            await asyncio.wait_for(self._abort_event.wait(), timeout=duration)
-            logger.info("rotate_by_angle: aborted by request_abort() after partial rotation")
-        except asyncio.TimeoutError:
-            pass  # normal completion — duration elapsed
+        async with self._lock:
+            try:
+                response = await asyncio.to_thread(
+                    self._adapter.send_line, command_str, read_timeout_s=read_timeout_s,
+                )
+            except RuntimeError as exc:
+                logger.exception("rotate_by_angle: send_line failed")
+                return MotionResult(ok=False, command=ArduinoCommand.STOP, error=str(exc))
+            except Exception as exc:
+                logger.exception("rotate_by_angle: unexpected error")
+                return MotionResult(ok=False, command=ArduinoCommand.STOP, error=str(exc))
 
-        # Step 3 — send STOP (always, even if abort fired)
-        stop_result = await self._try_send(ArduinoCommand.STOP)
+        # Parse the firmware reply.
+        if response.startswith("DONE:"):
+            try:
+                actual = int(response.split(":", 1)[1])
+            except ValueError:
+                actual = target_deg
+            logger.info(
+                "🧭 rotation complete: target=%d°, actual≈%d° (drift=%+d°)",
+                target_deg, actual, actual - target_deg,
+            )
+            await asyncio.sleep(calib.settle_s)
+            return MotionResult(ok=True, command=direction_cmd)
 
-        # Step 4 — settle wait (also outside lock; the robot decelerates)
-        await asyncio.sleep(calib.settle_s)
+        if response.startswith("ERR:"):
+            logger.warning("Arduino rotation error: %s", response)
+            # Defensive STOP in case the firmware errored after the motors started.
+            await self._try_send(ArduinoCommand.STOP)
+            return MotionResult(ok=False, command=ArduinoCommand.STOP, error=response)
 
-        if not stop_result.ok:
-            return stop_result
-        return MotionResult(ok=True, command=direction)
+        # Unexpected (empty/timeout/garbage) — be safe.
+        logger.warning("rotate_by_angle: unexpected response %r — issuing STOP", response)
+        await self._try_send(ArduinoCommand.STOP)
+        return MotionResult(
+            ok=False, command=ArduinoCommand.STOP,
+            error=f"unexpected response: {response[:80]!r}",
+        )

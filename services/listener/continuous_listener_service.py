@@ -8,6 +8,7 @@ from pathlib import Path
 
 from adapters.respeaker_adapter import RespeakerAdapter
 from utils.logger import get_logger
+from utils.subprocess_registry import track_subprocess, untrack_subprocess
 
 logger = get_logger(__name__)
 
@@ -80,12 +81,14 @@ class ContinuousListenerService:
         ]
         logger.debug("sox %s", " ".join(cmd[1:]))
 
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
+            track_subprocess(proc, label="continuous-listener sox")
             try:
                 _, stderr = await asyncio.wait_for(
                     proc.communicate(),
@@ -100,6 +103,18 @@ class ContinuousListenerService:
                     proc.kill()
                     await proc.wait()
                 stderr = b""
+            except asyncio.CancelledError:
+                logger.info("sox VAD recording cancelled; terminating capture")
+                if proc.returncode is None:
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=0.8)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                        await proc.wait()
+                raise
+            finally:
+                untrack_subprocess(proc)
 
             if proc.returncode not in (0, None):
                 err = (stderr or b"").decode("utf-8", errors="replace").strip()

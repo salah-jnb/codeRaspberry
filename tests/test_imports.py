@@ -18,6 +18,7 @@ MODULES = (
     "services.display.display_service",
     "services.motion.motion_service",
     "services.speech.speech_service",
+    "services.touch.touch_sensor_service",
     "services.hardware_check.hardware_check_service",
     "services.wake_word.vosk_engine",
     "services.wake_word.wake_word_service",

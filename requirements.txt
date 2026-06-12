@@ -4,6 +4,9 @@ httpx>=0.27,<1.0
 # Serial I/O for Nextion and Arduino
 pyserial>=3.5
 
+# GPIO touch sensor (Pi runtime)
+gpiozero>=1.6
+
 # Config loading
 python-dotenv>=1.0
 
