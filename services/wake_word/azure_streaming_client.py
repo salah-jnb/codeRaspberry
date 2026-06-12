@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
+import time
 from dataclasses import dataclass
 from typing import List, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -22,6 +24,23 @@ from urllib.parse import urlsplit, urlunsplit
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _pcm16_stats(chunk: bytes) -> tuple[int, float, int]:
+    """Return (sample_count, rms, peak) for little-endian signed 16-bit PCM."""
+    usable = len(chunk) - (len(chunk) % 2)
+    if usable <= 0:
+        return 0, 0.0, 0
+    count = usable // 2
+    total_sq = 0
+    peak = 0
+    for idx in range(0, usable, 2):
+        sample = int.from_bytes(chunk[idx:idx + 2], "little", signed=True)
+        magnitude = abs(sample)
+        if magnitude > peak:
+            peak = magnitude
+        total_sq += sample * sample
+    return count, math.sqrt(total_sq / count), peak
 
 
 @dataclass(frozen=True)
@@ -78,6 +97,9 @@ class AzureStreamingWakeWordClient:
         self._closed = False
         self._chunks_sent = 0
         self._bytes_sent = 0
+        self._events_seen = 0
+        self._partials_seen = 0
+        self._last_audio_log_at = 0.0
 
     @property
     def matched(self) -> Optional[StreamingWakeMatch]:
@@ -136,10 +158,12 @@ class AzureStreamingWakeWordClient:
         self._ws = None
         if self._chunks_sent or self._bytes_sent:
             logger.info(
-                "Wake-word stream: sent %d chunks (%d bytes = %.1fs of mono PCM)",
+                "Wake-word stream: sent %d chunks (%d bytes = %.1fs of mono PCM, events=%d, partials=%d)",
                 self._chunks_sent,
                 self._bytes_sent,
                 self._bytes_sent / 32000.0,
+                self._events_seen,
+                self._partials_seen,
             )
 
     async def _reader_loop(self) -> None:
@@ -154,6 +178,7 @@ class AzureStreamingWakeWordClient:
                     logger.debug("Wake-word stream: non-JSON frame: %r", raw[:120])
                     continue
                 event = payload.get("event")
+                self._events_seen += 1
                 if event == "ready":
                     logger.info("Wake-word stream: ready (Azure recognizer started)")
                     self._ready_event.set()
@@ -174,6 +199,7 @@ class AzureStreamingWakeWordClient:
                 elif event == "error":
                     logger.warning("Wake-word stream backend error: %s", payload.get("message"))
                 elif event == "partial":
+                    self._partials_seen += 1
                     text = str(payload.get("text") or "")
                     latency_ms = int(payload.get("latency_ms") or 0)
                     if self._log_partials:
@@ -196,6 +222,27 @@ class AzureStreamingWakeWordClient:
                 await self._ws.send(chunk)
                 self._chunks_sent += 1
                 self._bytes_sent += len(chunk)
+                samples, rms, peak = _pcm16_stats(chunk)
+                now = time.monotonic()
+                should_log = self._chunks_sent == 1 or (now - self._last_audio_log_at) >= 4.0
+                if should_log:
+                    self._last_audio_log_at = now
+                    logger.info(
+                        "Wake-word audio -> backend: chunks=%d bytes=%d pcm_s=%.1f len=%d samples=%d rms=%.1f peak=%d partials=%d",
+                        self._chunks_sent,
+                        self._bytes_sent,
+                        self._bytes_sent / 32000.0,
+                        len(chunk),
+                        samples,
+                        rms,
+                        peak,
+                        self._partials_seen,
+                    )
+                    if self._chunks_sent > 8 and peak < 80:
+                        logger.warning(
+                            "Wake-word audio looks almost silent (peak=%d). Check RESPEAKER_DEVICE/native channels/default mic.",
+                            peak,
+                        )
         except asyncio.CancelledError:
             raise
         except Exception:

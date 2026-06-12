@@ -258,6 +258,8 @@ class RespeakerAdapter:
                 "ON" if self._needs_remix else "OFF (single-channel firmware)",
             )
 
+            logger.info("Mic command: %s", " ".join(cmd))
+
             # start_new_session=True puts sox/arecord in its own process group
             # so we can later send SIGKILL to the WHOLE group (killpg) — needed
             # because sox can spawn helper threads / subprocesses that ignore
