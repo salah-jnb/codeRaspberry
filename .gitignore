@@ -1,0 +1,23 @@
+# ── Machine-local config (each machine keeps its own; never commit) ──
+.env
+.env.*
+!.env.example
+
+# ── Python bytecode / caches ──
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# ── Virtualenvs ──
+.venv/
+venv/
+env/
+
+# ── Models / large assets downloaded at runtime ──
+models/vosk/*/
+
+# ── OS / editor noise ──
+.DS_Store
+Thumbs.db
+*.bak
