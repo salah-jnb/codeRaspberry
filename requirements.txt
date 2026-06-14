@@ -6,9 +6,13 @@ pyserial>=3.5
 
 # GPIO touch sensor (Pi runtime)
 gpiozero>=1.6
-# Pin-factory backend for recent Pi kernels (6.x): gpiozero needs lgpio here —
-# RPi.GPIO no longer works on kernel 6.x. Without it the touch sensor is disabled.
-lgpio>=0.2
+# Pin-factory backend: gpiozero needs lgpio on recent Pi kernels (6.x) —
+# RPi.GPIO no longer works there. lgpio does NOT pip-build on the Pi (needs
+# swig + liblgpio-dev), so use the system package and link it into the venv:
+#   sudo apt install -y python3-lgpio
+#   SP=.venv/lib/python3.13/site-packages
+#   ln -sf /usr/lib/python3/dist-packages/lgpio.py "$SP/"
+#   ln -sf /usr/lib/python3/dist-packages/_lgpio.cpython-313-aarch64-linux-gnu.so "$SP/"
 
 # Config loading
 python-dotenv>=1.0
