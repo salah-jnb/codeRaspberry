@@ -113,12 +113,26 @@ class TouchSensorService:
         devices = []
         try:
             for pin in self._pins:
-                device = DigitalInputDevice(
-                    pin,
-                    pull_up=self._pull_up,
-                    active_state=self._active_high,
-                    bounce_time=self._bounce or None,
-                )
+                # gpiozero forbids `active_state` unless the pin is floating
+                # (pull_up=None). With an internal pull it DERIVES the active
+                # level from the pull direction (pull_up=False => active-HIGH,
+                # pull_up=True => active-LOW). Passing active_state together with
+                # a non-None pull_up raises PinInvalidState ("Pin … is not
+                # floating, but active_state is not None") — which is why the
+                # sensor failed to start. Only set active_state when floating.
+                if self._pull_up is None:
+                    device = DigitalInputDevice(
+                        pin,
+                        pull_up=None,
+                        active_state=self._active_high,
+                        bounce_time=self._bounce or None,
+                    )
+                else:
+                    device = DigitalInputDevice(
+                        pin,
+                        pull_up=self._pull_up,
+                        bounce_time=self._bounce or None,
+                    )
                 device.when_activated = lambda pin=pin: emit_touch(pin)
                 devices.append(device)
             self._devices = devices
