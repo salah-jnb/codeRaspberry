@@ -325,7 +325,13 @@ def load_config() -> AppConfig:
         min_speech_seconds=_env_float("LISTENER_MIN_SPEECH_SECONDS", 0.2),
     )
     rotation = RotationConfig(
-        enabled=_env_str("ROTATION_ENABLED", "1") not in {"0", "false", "no"},
+        # ── DOA-driven rotation PARKED (2026-06-14): the DOA is unreliable in the
+        #    current room/mounting (reverberation + on-board noise drowning the
+        #    speaker). Forced off here so it stays disabled regardless of the Pi's
+        #    ROTATION_ENABLED=1. To re-enable: delete this line and uncomment the
+        #    env-driven one below.
+        enabled=False,
+        # enabled=_env_str("ROTATION_ENABLED", "1") not in {"0", "false", "no"},
         slope_deg_per_s=_env_float("ROTATION_SLOPE_DEG_PER_S", 60.0),
         offset_deg=_env_float("ROTATION_OFFSET_DEG", 3.3),
         min_duration_s=_env_float("ROTATION_MIN_DURATION_S", 0.05),
