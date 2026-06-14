@@ -371,37 +371,33 @@ async def _rotate_toward_speaker(
     config: AppConfig,
     *,
     label: str,
-    wait_for_voice_s: float,
+    sample_window_s: float,
 ) -> None:
     """Read the DOA and pivot the chassis toward the current speaker.
 
-    `wait_for_voice_s` controls how long we poll the XMOS voice-activity bit
-    before falling back to the latest DOA snapshot:
-      - **0.0** for the wake-word case — the angle is already fresh (the user
-        just said the wake word, the XMOS register holds that direction).
-      - **2–3s** for follow-up turns — the user may have moved silently
-        between questions; we wait for the next utterance to read the angle
-        at the right moment.
+    We sample the XMOS DOA over ``sample_window_s`` WHILE the person speaks,
+    keep only voice-active samples and return their circular mean (outliers
+    rejected). A single instantaneous read is far too noisy: it gets pulled
+    off by Pi-fan noise, reflections, or a stale value captured after the wake
+    word already ended. See ``DOAReader.read_angle_stable``.
+
+    ``sample_window_s`` is the listening window before we commit to an angle:
+      - ~2s at the wake word — wait for the start of the user's utterance.
+      - ~2s on follow-up turns — re-orient on the next thing they say.
+    If not enough voiced samples are collected, we fall back to one snapshot
+    rather than spin toward noise.
     """
     if doa_reader is None or not doa_reader.available or not config.rotation.enabled:
         return
     if not motion._adapter.is_open:
         return
 
-    raw_angle = None
-    source = "snapshot"
-    if wait_for_voice_s > 0:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + wait_for_voice_s
-        while loop.time() < deadline:
-            if await asyncio.to_thread(doa_reader.voice_active):
-                raw_angle = await asyncio.to_thread(doa_reader.read_angle)
-                if raw_angle is not None:
-                    source = "voice"
-                    break
-            await asyncio.sleep(0.1)
+    raw_angle = await asyncio.to_thread(doa_reader.read_angle_stable, sample_window_s)
+    source = "stable"
     if raw_angle is None:
+        # Too few voiced samples — last resort single read (better than nothing).
         raw_angle = await asyncio.to_thread(doa_reader.read_angle)
+        source = "snapshot-fallback"
     if raw_angle is None:
         logger.debug("DOA read returned None — skipping rotation (%s)", label)
         return
@@ -535,7 +531,7 @@ async def _wake_word_iteration(
     rotate_task: Optional[asyncio.Task] = None
     if doa_reader is not None and doa_reader.available and config.rotation.enabled:
         rotate_task = asyncio.create_task(_rotate_toward_speaker(
-            doa_reader, motion, config, label="wake", wait_for_voice_s=0.0,
+            doa_reader, motion, config, label="wake", sample_window_s=2.0,
         ))
     if face_recognition is not None:
         face_recognition.fire_and_forget_refresh()
@@ -576,7 +572,7 @@ async def _wake_word_iteration(
         # Re-orient toward the speaker — but only briefly poll voice so the
         # user doesn't wait if they speak right away.
         await _rotate_toward_speaker(
-            doa_reader, motion, config, label="follow", wait_for_voice_s=1.5,
+            doa_reader, motion, config, label="follow", sample_window_s=2.0,
         )
         had_speech = await _run_active_turn(conversation)
         if had_speech:
