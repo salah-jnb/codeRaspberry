@@ -189,9 +189,26 @@ class ConversationService:
             logger.debug("Could not save debug capture WAV: %s", exc)
 
         extra_text = await self._resolve_extra_text()
+
+        # Personne inconnue → on joint la photo capturée à la requête n8n, pour
+        # que le workflow puisse enregistrer le nouveau visage si la question
+        # est une présentation (« je m'appelle … »). Pour une personne connue,
+        # inutile d'alourdir : on n'envoie rien.
+        image_jpeg = None
+        if self._face_recognition is not None and str(extra_text or "").strip().lower() in (
+            "inconnu", "inconnue", "unknown", "unkonu",
+        ):
+            image_jpeg = self._face_recognition.cached_jpeg
+            if image_jpeg:
+                logger.info(
+                    "🖼️  Personne inconnue — j'envoie la photo (%d octets) pour permettre l'enregistrement",
+                    len(image_jpeg),
+                )
+
         logger.info(
-            "📥 Captured %d bytes (saved to %s)  extra_text=%r  voice=%r",
+            "📥 Captured %d bytes (saved to %s)  extra_text=%r  voice=%r  image=%s",
             len(wav_in), _DEBUG_CAPTURE_WAV, extra_text, self._voice_name,
+            f"{len(image_jpeg)}o" if image_jpeg else "non",
         )
 
         await self._display.set_expression(Expression.THINKING)
@@ -201,6 +218,7 @@ class ConversationService:
                 wav_in,
                 extra_text=extra_text,
                 voice_name=self._voice_name,
+                image_jpeg=image_jpeg,
             )
         except Exception as exc:
             detail = getattr(getattr(exc, "response", None), "text", None)

@@ -194,18 +194,26 @@ class BackendClient:
         *,
         extra_text: Optional[str] = None,
         voice_name: Optional[str] = None,
+        image_jpeg: Optional[bytes] = None,
     ) -> ActionResult:
-        """Multi-type pipeline — preferred over speech_to_n8n_to_speech for full action support."""
+        """Multi-type pipeline — preferred over speech_to_n8n_to_speech for full action support.
+
+        ``image_jpeg`` (optionnel) : photo de la personne, transmise au backend
+        puis à n8n quand la personne est inconnue, pour enregistrer un nouveau
+        visage lors d'une présentation.
+        """
         client = self._require()
         files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
+        if image_jpeg:
+            files["image"] = ("capture.jpg", image_jpeg, "image/jpeg")
         data: dict[str, str] = {}
         if extra_text:
             data["extra_text"] = extra_text
         if voice_name:
             data["voice_name"] = voice_name
         logger.info(
-            "→ POST /api/audio/speech-to-action  wav=%d bytes  form=%s",
-            len(wav_bytes), data or "{}",
+            "→ POST /api/audio/speech-to-action  wav=%d bytes  image=%s  form=%s",
+            len(wav_bytes), f"{len(image_jpeg)}o" if image_jpeg else "non", data or "{}",
         )
         # Full STT + n8n + TTS pipeline. With backend N8N_TIMEOUT_S=30 + Azure
         # STT ~10s + TTS ~3s, normal upper bound ≈ 50 s. We cap at 90 s as a

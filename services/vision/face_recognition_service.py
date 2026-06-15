@@ -40,6 +40,11 @@ class FaceRecognitionService:
         self._cache_seconds = max(0.0, cache_seconds)
         self._fallback = (fallback_name or _UNKNOWN_LABEL).strip() or _UNKNOWN_LABEL
         self._cached_name: Optional[str] = None
+        # Dernière photo capturée lors de l'identification. Réutilisée par la
+        # conversation pour l'envoyer à n8n quand la personne est inconnue (cas
+        # « présentation » → enregistrement d'un nouveau visage), sans refaire
+        # une capture caméra.
+        self._cached_jpeg: Optional[bytes] = None
         self._cached_at: float = 0.0
         self._lock = asyncio.Lock()
         # Strong reference to the in-flight background refresh task. Without
@@ -58,10 +63,21 @@ class FaceRecognitionService:
             return None
         return self._cached_name
 
+    @property
+    def cached_jpeg(self) -> Optional[bytes]:
+        """La dernière photo capturée, tant que le cache est valide (même
+        fenêtre que ``cached_name``). ``None`` si rien ou cache expiré."""
+        if self._cached_jpeg is None:
+            return None
+        if self._cache_seconds > 0 and (time.time() - self._cached_at) > self._cache_seconds:
+            return None
+        return self._cached_jpeg
+
     async def refresh(self) -> str:
         """Force a new capture + identification. Updates the cache. Always returns a name."""
         async with self._lock:
             jpg = await self._camera.capture_jpeg()
+            self._cached_jpeg = jpg or None
             if not jpg:
                 logger.warning("Face recognition: no image captured — using fallback %r", self._fallback)
                 self._cached_name = self._fallback
