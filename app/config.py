@@ -123,6 +123,9 @@ class ConversationConfig:
     # the old default of 3 (which wasted ~10 s of motors + face_id roundtrips
     # on an empty room).
     max_active_silences: int = 2
+    # Seconds of silence (no speech started) during an active conversation
+    # before KODA gives up the follow-up and goes back to sleep.
+    active_idle_timeout_s: float = 10.0
     greeting_text: str = "أهلا بيك"
     # Démarrage de conversation autonome après N secondes d'inactivité.
     # Le robot identifie le visage en face (ou "inconnu") puis appelle
@@ -159,10 +162,11 @@ class HybridWakeWordConfig:
     """Hybrid Vosk (sleep gate) + Azure WS (race) wake-word recogniser."""
     # If False, fall back to pure Vosk (the previous default).
     enabled: bool = False
-    # "direct" mirrors tests/test_ws_wake_word.py: WS is opened immediately
-    # and Azure receives the ReSpeaker stream continuously. "gate" keeps the
-    # older Vosk-gated mode.
-    mode: str = "direct"
+    # "hybrid"/"gate" (default): Vosk runs locally as the sleep gate and the
+    # Azure WS is opened ONLY while someone is speaking — zero cloud cost while
+    # silent. "direct" mirrors tests/test_ws_wake_word.py: WS opened immediately
+    # and Azure receives the ReSpeaker stream continuously (never closes on idle).
+    mode: str = "hybrid"
     # How long we keep Azure WS open after Vosk wakes the gate.
     awaiting_timeout_s: float = 6.0
     # Locale Azure uses on its side. Empty = derive from vosk language.
@@ -300,6 +304,7 @@ def load_config() -> AppConfig:
         inter_turn_pause_seconds=_env_float("INTER_TURN_PAUSE", 0.5),
         play_gesture_during_speech=_env_str("GESTURE_DURING_SPEECH", "1") not in {"0", "false", "no"},
         max_active_silences=_env_int("MAX_ACTIVE_SILENCES", 3),
+        active_idle_timeout_s=_env_float("CONVERSATION_ACTIVE_IDLE_TIMEOUT_S", 10.0),
         greeting_text=_env_str("GREETING_TEXT", "أهلا بيك"),
         passive_greet_enabled=_env_str("PASSIVE_GREET_ENABLED", "1") not in {"0", "false", "no"},
         passive_greet_interval_s=_env_float("PASSIVE_GREET_INTERVAL_S", 300.0),
@@ -370,7 +375,7 @@ def load_config() -> AppConfig:
     )
     hybrid_wake_word = HybridWakeWordConfig(
         enabled=_env_str("HYBRID_WAKE_WORD_ENABLED", "0") in {"1", "true", "yes"},
-        mode=_env_str("HYBRID_WAKE_WORD_MODE", "direct").lower(),
+        mode=_env_str("HYBRID_WAKE_WORD_MODE", "hybrid").lower(),
         awaiting_timeout_s=_env_float("HYBRID_AWAITING_TIMEOUT_S", 6.0),
         azure_language=_env_str("HYBRID_AZURE_LANGUAGE", ""),
         log_partials=_env_str("WAKE_WORD_WS_LOG_PARTIALS", "1") not in {"0", "false", "no"},

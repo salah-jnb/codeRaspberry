@@ -40,15 +40,18 @@ class ContinuousListenerService:
         if not self._sox_available:
             logger.warning("sox not found — VAD disabled, using fixed %.1fs recording", self._config.max_seconds)
 
-    async def listen(self) -> bytes:
+    async def listen(self, no_speech_timeout_s: float | None = None) -> bytes:
+        """Record speech via VAD. If ``no_speech_timeout_s`` is given and no
+        speech starts within it, return ``b""`` (the caller treats this as
+        "user went silent") instead of falling back to a fixed-duration grab."""
         if self._sox_available:
             try:
-                return await self._record_with_vad()
+                return await self._record_with_vad(no_speech_timeout_s=no_speech_timeout_s)
             except Exception:
                 logger.exception("sox VAD recording failed; falling back to fixed-duration capture")
         return await self._adapter.record(self._config.max_seconds)
 
-    async def _record_with_vad(self) -> bytes:
+    async def _record_with_vad(self, no_speech_timeout_s: float | None = None) -> bytes:
         out_path = Path(tempfile.mkstemp(suffix=".wav", prefix="koda_listen_")[1])
         cfg = self._config
         native_ch = self._adapter_native_channels()
@@ -89,10 +92,18 @@ class ContinuousListenerService:
                 stderr=asyncio.subprocess.PIPE,
             )
             track_subprocess(proc, label="continuous-listener sox")
+            # In follow-up mode we only give the user `no_speech_timeout_s` to
+            # START talking; otherwise allow the full record + initial-silence
+            # budget for the first turn after wake/touch.
+            communicate_timeout = (
+                no_speech_timeout_s
+                if no_speech_timeout_s is not None
+                else cfg.max_seconds + cfg.initial_silence_max_s
+            )
             try:
                 _, stderr = await asyncio.wait_for(
                     proc.communicate(),
-                    timeout=cfg.max_seconds + cfg.initial_silence_max_s,
+                    timeout=communicate_timeout,
                 )
             except asyncio.TimeoutError:
                 logger.warning("sox exceeded max recording time; terminating")
@@ -133,6 +144,11 @@ class ContinuousListenerService:
                 self._adapter_sample_rate() * 2 * cfg.min_speech_seconds * 0.5
             )
             if len(data) < min_speech_bytes:
+                if no_speech_timeout_s is not None:
+                    # Bounded follow-up listen: nobody spoke in the idle window.
+                    # Return empty so the caller can put KODA to sleep cleanly
+                    # (NOT an error → no fixed-duration fallback record).
+                    return b""
                 raise RuntimeError(
                     f"sox produced only {len(data)} bytes (<{min_speech_bytes} expected); "
                     "capture device was likely busy or silent — aborting turn"

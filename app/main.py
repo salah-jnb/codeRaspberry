@@ -549,16 +549,36 @@ async def _wake_word_iteration(
         except Exception:
             logger.exception("rotation task failed")
 
-    # ── Listen immediately — no second rotation pass ──
+    # ── Active conversation: listen + follow-ups until the user goes quiet ──
+    await _run_active_conversation(
+        conversation, display, motion, config, stop_event, doa_reader,
+    )
+
+
+async def _run_active_conversation(
+    conversation: ConversationService,
+    display: DisplayService,
+    motion: MotionService,
+    config: AppConfig,
+    stop_event: asyncio.Event,
+    doa_reader: Optional[DOAReader],
+) -> None:
+    """Listen for the user's question, then keep answering follow-ups until the
+    user stays silent for ``active_idle_timeout_s`` — then return so the caller
+    drops back to passive (sleep / wake-word) listening.
+
+    Shared by the wake-word path and the post-touch resume path so a touch
+    interrupt lands KODA straight back at "waiting for your question" instead of
+    all the way back at the wake word.
+    """
     state("ACTIVE")
     await _safe_async("display.set_expression(THINKING)",
                       display.set_expression(Expression.THINKING))
     await conversation.listen_and_answer()
 
-    # ── Follow-up turns ──
-    consecutive_silences = 0
-    max_silences = max(0, config.conversation.max_active_silences)
-    while not stop_event.is_set() and consecutive_silences < max_silences:
+    idle_timeout = max(2.0, config.conversation.active_idle_timeout_s)
+    while not stop_event.is_set():
+        # Brief pause so KODA doesn't re-open the mic on top of its own TTS tail.
         try:
             await asyncio.wait_for(
                 stop_event.wait(),
@@ -568,30 +588,24 @@ async def _wake_word_iteration(
         except asyncio.TimeoutError:
             pass
 
-        state("ACTIVE", f"follow-up {consecutive_silences + 1}/{max_silences}")
-        # Re-orient toward the speaker — but only briefly poll voice so the
-        # user doesn't wait if they speak right away.
+        state("ACTIVE", f"follow-up (idle {idle_timeout:.0f}s)")
         await _rotate_toward_speaker(
             doa_reader, motion, config, label="follow", sample_window_s=2.0,
         )
-        had_speech = await _run_active_turn(conversation)
-        if had_speech:
-            consecutive_silences = 0
-        else:
-            consecutive_silences += 1
-            state("SILENCE", f"{consecutive_silences}/{max_silences}")
+        had_speech = await _run_followup_turn(conversation, idle_timeout)
+        if not had_speech:
+            break  # silent for the whole idle window → back to sleep
 
     state("SLEEP")
     await _safe_async("display.resume_idle", display.resume_idle())
 
 
-async def _run_active_turn(conversation: ConversationService) -> bool:
-    """Run one active conversation turn. Returns True if speech was heard."""
+async def _run_followup_turn(conversation: ConversationService, idle_timeout_s: float) -> bool:
+    """One follow-up turn bounded by ``idle_timeout_s``. True if speech heard."""
     try:
-        await conversation.listen_and_answer()
-        return True
+        return await conversation.listen_for_followup(idle_timeout_s)
     except Exception:
-        logger.exception("Active turn failed")
+        logger.exception("Follow-up turn failed")
         return False
 
 
@@ -698,8 +712,44 @@ async def _handle_touch_interrupt(
         return_exceptions=True,
     )
     await _cancel_behavior_task(behavior_task)
-    await _safe_async("kill_tracked_subprocesses(touch)", kill_tracked_subprocesses(grace_s=0.25))
+    # Let ALSA release the mic the cancelled task just freed — its listener /
+    # wake-word engine `finally` already terminates THEIR own sox. Do NOT call
+    # the global kill_tracked_subprocesses() here: it is a shutdown-level nuke
+    # that also kills the wake-word mic the resumed loop is about to reopen,
+    # which left KODA hung after a touch. A short settle avoids device contention.
+    await asyncio.sleep(0.3)
     await _play_tickle_laugh(display, speech, audio_output, config)
+
+
+def _create_post_touch_task(
+    wake_word: Optional[WakeWordService],
+    conversation: ConversationService,
+    display: DisplayService,
+    motion: MotionService,
+    speech: SpeechService,
+    config: AppConfig,
+    stop_event: asyncio.Event,
+    doa_reader: Optional[DOAReader],
+    face_recognition: Optional[FaceRecognitionService],
+) -> asyncio.Task:
+    """After a touch interrupt: drop straight into listening for the user's
+    next question (active, no wake word, no greeting), then resume the normal
+    passive wake-word loop once the conversation goes quiet."""
+    async def _runner() -> None:
+        await _run_active_conversation(
+            conversation, display, motion, config, stop_event, doa_reader,
+        )
+        if stop_event.is_set():
+            return
+        if wake_word is not None:
+            await _run_wake_word_loop(
+                wake_word, conversation, display, motion, speech, config,
+                stop_event, doa_reader, face_recognition,
+            )
+        else:
+            await _run_legacy_loop(conversation, config, stop_event)
+
+    return asyncio.create_task(_runner(), name="koda-post-touch")
 
 
 async def _run_robot_loop_with_touch(
@@ -782,7 +832,9 @@ async def _run_robot_loop_with_touch(
                 )
                 if stop_event.is_set():
                     break
-                behavior_task = _create_behavior_task(
+                # Resume by LISTENING FOR THE QUESTION (active), not back at the
+                # wake word — touch means "stop, I want to ask/say something".
+                behavior_task = _create_post_touch_task(
                     wake_word,
                     conversation,
                     display,

@@ -76,6 +76,22 @@ class ConversationService:
             return
         await self._process_audio(wav_in)
 
+    async def listen_for_followup(self, idle_timeout_s: float) -> bool:
+        """Listen for a follow-up question, giving the user ``idle_timeout_s``
+        to start talking. Returns True if speech was heard and answered, False
+        if the user stayed silent (the caller then puts KODA back to sleep)."""
+        if self._listener is None:
+            return False
+        try:
+            wav_in = await self._listener.listen(no_speech_timeout_s=idle_timeout_s)
+        except Exception:
+            logger.exception("Follow-up listening failed")
+            return False
+        if not wav_in:
+            return False  # silence within the idle window → sleep
+        await self._process_audio(wav_in)
+        return True
+
     async def handle_text_question(self, text: str) -> None:
         """Send pre-transcribed text to n8n, synthesize, play the reply."""
         if not text or not text.strip():
