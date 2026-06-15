@@ -205,13 +205,21 @@ async def _bootstrap_in_parallel(
             warn("Bluetooth speaker unavailable -- falling back to default sink")
 
     async def _health_task() -> None:
-        # 3 attempts × exp backoff (1s, 2s, 4s) — covers uvicorn cold start
-        # and gives us a clear "degraded mode" log if the backend really is down.
-        await backend.health_with_retry(attempts=3, base_delay_s=1.0)
+        # Purely informational: produces a "degraded mode" log if the backend is
+        # unreachable. It must NOT gate boot.
+        try:
+            await backend.health_with_retry(attempts=3, base_delay_s=1.0)
+        except Exception:
+            logger.debug("backend health probe task errored", exc_info=True)
+
+    # Fire the health probe in the BACKGROUND and DON'T await it in the gather:
+    # when the backend is slow/unreachable it takes ~48s (3 × 15s timeouts +
+    # backoff), which froze the robot at startup before it could listen. The
+    # robot runs in degraded mode anyway, so the probe never needs to block boot.
+    asyncio.create_task(_health_task(), name="backend-health-probe")
 
     tasks: list[asyncio.Task] = [
         asyncio.create_task(_bluetooth_task()),
-        asyncio.create_task(_health_task()),
         asyncio.create_task(_prepare_doa_reader(doa_reader, config, rotation_calib)),
     ]
     if wake_word is not None:
