@@ -453,6 +453,13 @@ async def _run_wake_word_loop(
                 continue
 
 
+# Sentinelle renvoyée par _wait_for_wake_or_passive_greet quand c'est le
+# bonjour autonome (passive_greet) qui s'est déclenché — et non un mot d'éveil.
+# Le robot a déjà PARLÉ, donc l'appelant doit enchaîner directement sur l'écoute
+# active (la réponse de l'utilisateur) SANS re-dire bonjour.
+_PASSIVE_GREET_DONE = object()
+
+
 async def _wait_for_wake_or_passive_greet(
     wake_word: WakeWordService,
     conversation: ConversationService,
@@ -492,7 +499,7 @@ async def _wait_for_wake_or_passive_greet(
         if wake_task in done:
             return wake_task.result()
 
-        # Idle a gagné → démarrer une conversation autonome puis recommencer.
+        # Idle a gagné → démarrer une conversation autonome.
         state("PASSIVE-GREET", f"{interval_s:.0f}s idle — bonjour autonome")
         try:
             await conversation.passive_greet()
@@ -500,6 +507,10 @@ async def _wait_for_wake_or_passive_greet(
             raise
         except Exception:
             logger.exception("passive_greet failed — back to passive listening")
+            continue
+        # KODA vient de parler tout seul → on rend la main pour qu'il ÉCOUTE
+        # la réponse (mode actif), au lieu de retourner dormir directement.
+        return _PASSIVE_GREET_DONE
 
 
 async def _wake_word_iteration(
@@ -525,6 +536,14 @@ async def _wake_word_iteration(
         wake_word, conversation, config, stop_event,
     )
     if match is None:
+        return
+
+    # Bonjour autonome : KODA a déjà parlé → on écoute la réponse tout de suite
+    # (mode actif), sans re-dire bonjour ni re-tourner la tête.
+    if match is _PASSIVE_GREET_DONE:
+        await _run_active_conversation(
+            conversation, display, motion, config, stop_event, doa_reader,
+        )
         return
 
     state("WAKE", match.keyword)
