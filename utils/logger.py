@@ -120,9 +120,19 @@ def get_logger(name: str) -> logging.Logger:
             handler.setFormatter(logging.Formatter(_VERBOSE_FORMAT, datefmt=_VERBOSE_DATEFMT))
         else:
             handler.setFormatter(_CompactFormatter())
+        # LOG_SIMPLE=1 : journal lisible uniquement. La CONSOLE des modules
+        # techniques (respeak, vosk, backend, arduino…) est limitée aux
+        # avertissements/erreurs ; seul le journal "koda" (phrases claires de
+        # utils/states.py) reste affiché en INFO. Le fichier log garde TOUT.
+        if _simple_mode() and _short_module(name) != "koda":
+            handler.setLevel(logging.WARNING)
         logger.addHandler(handler)
         # Keep stdout exclusive on the per-logger handler — but DO propagate
         # so the root's RotatingFileHandler also receives the records.
         logger.propagate = True
     logger.setLevel(_resolve_level())
     return logger
+
+
+def _simple_mode() -> bool:
+    return os.environ.get("LOG_SIMPLE", "").strip().lower() in {"1", "true", "yes", "on"}

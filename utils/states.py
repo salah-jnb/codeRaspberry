@@ -1,21 +1,18 @@
-"""Pretty state-transition logging for KODA's main loop.
+"""Journal d'état de KODA — une ligne CLAIRE et SIMPLE par état du robot.
 
-Each call prints a single line with a glyph + short tag + message.
-Override SYMBOLS in your environment if your terminal mangles emoji.
+Chaque ``state(tag)`` affiche une phrase en français facile à lire (« Je dors »,
+« Je t'écoute », « Je réfléchis »…) au lieu d'un jargon technique. Le but : voir
+d'un coup d'œil ce que fait le robot, sans connaître le code.
 
-Usage:
+Astuce : lance avec ``LOG_SIMPLE=1 python -m app.main`` pour ne garder QUE ce
+journal (les logs techniques des modules passent en silencieux). Voir
+``utils/logger.py``.
+
+Usage :
     from utils.states import state, error, warn
-    state("BOOT", f"robot_id={cfg.robot_id}")
-    state("PASSIVE", "waiting for wake word")
-    state("WAKE",    f"keyword={match.keyword}")
-    state("GREET",   '"ahla bik"')
-    state("ACTIVE",  "listening (VAD, max 15s)")
-    state("THINK",   "STT + n8n + TTS")
-    state("SPEAK",   "playing reply")
-    state("SILENCE", "2/3 in active mode")
-    state("SLEEP",   "back to wake-word watch")
-    warn("BT speaker not ready, falling back to default sink")
-    error("backend pipeline failed", reason="503 Service Unavailable")
+    state("PASSIVE")            -> 😴 Je dors — appelle-moi pour me réveiller
+    state("WAKE", "mohsen")     -> 🎯 On m'a appelé !  (mohsen)
+    state("HEARD", "salut")     -> 📝 J'ai entendu : salut
 """
 from __future__ import annotations
 
@@ -25,42 +22,50 @@ from utils.logger import get_logger
 
 logger = get_logger("koda")
 
-SYMBOLS: dict[str, str] = {
-    "BOOT":     "🤖",
-    "HW":       "🔌",
-    "READY":    "✅",
-    "PASSIVE":  "👂",
-    "WAKE":     "🎯",
-    "GREET":    "👋",
-    "ACTIVE":   "🎤",
-    "THINK":    "💭",
-    "HEARD":    "📝",
-    "REPLY":    "💬",
-    "SPEAK":    "🔊",
-    "SILENCE":  "🤫",
-    "SLEEP":    "😴",
-    "WARN":     "⚠️ ",
-    "ERROR":    "❌",
-    "SHUTDOWN": "🛑",
+# tag -> (emoji, phrase simple en français)
+_PHRASES: dict[str, str] = {
+    "BOOT":          "🤖 Je démarre…",
+    "HW":            "🔌 Je vérifie mon corps (micro, caméra, moteurs)…",
+    "READY":         "✅ Je suis prêt !",
+    "PASSIVE":       "😴 Je dors — appelle-moi « Mohsen » pour me réveiller",
+    "WAKE":          "🎯 On m'a appelé !",
+    "GREET":         "👋 Je dis bonjour",
+    "ACTIVE":        "👂 Je t'écoute…",
+    "THINK":         "🤔 Je réfléchis…",
+    "HEARD":         "📝 J'ai entendu :",
+    "REPLY":         "💬 J'ai une réponse",
+    "SPEAK":         "🗣️  Je parle…",
+    "SILENCE":       "🤫 Silence… je vais bientôt me rendormir",
+    "SLEEP":         "😴 Je me rendors",
+    "PASSIVE-GREET": "👋 Personne ne parle — je lance la conversation tout seul",
+    "TOUCH":         "✋ On m'a touché — j'arrête tout",
+    "LISTEN":        "🎙️  Quelqu'un parle — j'ouvre grand les oreilles",
+    "DOZE":          "💤 Plus rien à entendre — je remets les oreilles en veille",
+    "MUSIC":         "🎵 Je mets de la musique",
+    "MOVE":          "🦿 Je bouge",
+    "SHUTDOWN":      "🛑 Je m'éteins",
 }
 
-
-def _format_extras(extras: dict[str, Any]) -> str:
-    if not extras:
-        return ""
-    return "  " + "  ".join(f"{k}={v}" for k, v in extras.items())
+# Tags pour lesquels le petit complément (nom, texte entendu…) est utile et
+# reste lisible — on l'ajoute « : … ». Pour tous les autres on ignore le détail
+# technique afin de garder le journal propre.
+_KEEP_DETAIL = {"WAKE", "GREET", "HEARD", "REPLY", "PASSIVE-GREET", "MUSIC"}
 
 
 def state(tag: str, message: str = "", **extras: Any) -> None:
-    symbol = SYMBOLS.get(tag, "•")
-    body = f" {message}" if message else ""
-    body += _format_extras(extras)
-    logger.info("%s %s%s", symbol, tag, body)
+    phrase = _PHRASES.get(tag)
+    if phrase is None:
+        # Tag inconnu : on garde un affichage minimal (compat).
+        body = f" {message}" if message else ""
+        logger.info("• %s%s", tag, body)
+        return
+    detail = f" {message.strip()}" if (message and tag in _KEEP_DETAIL) else ""
+    logger.info("%s%s", phrase, detail)
 
 
 def warn(message: str, **extras: Any) -> None:
-    logger.warning("%s%s", message, _format_extras(extras))
+    logger.warning("%s", message)
 
 
 def error(message: str, **extras: Any) -> None:
-    logger.error("%s%s", message, _format_extras(extras))
+    logger.error("%s", message)

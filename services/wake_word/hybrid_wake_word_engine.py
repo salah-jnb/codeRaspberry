@@ -41,6 +41,9 @@ from services.wake_word.azure_streaming_client import AzureStreamingWakeWordClie
 from services.wake_word.vosk_engine import VoskWakeWordEngine, WakeMatch
 from services.wake_word.wake_word_matcher import WakeWordMatcher
 from utils.logger import get_logger
+# Alias: ce module utilise déjà une variable locale `state` (machine SLEEP/
+# AWAITING), donc on importe le journal sous un autre nom.
+from utils.states import state as journal
 
 logger = get_logger(__name__)
 
@@ -125,6 +128,7 @@ class HybridWakeWordEngine:
         async def _enter_awaiting(trigger_text: str) -> None:
             nonlocal state, awaiting_deadline, azure_client, azure_queue
             logger.info("🟡 SLEEP → AWAITING (Vosk caught speech: %r)", trigger_text[:80])
+            journal("LISTEN")
             state = "AWAITING"
             awaiting_deadline = time.perf_counter() + self._awaiting_timeout_s
             azure_queue = await broadcaster.add_consumer()
@@ -148,6 +152,7 @@ class HybridWakeWordEngine:
         async def _exit_awaiting(reason: str) -> None:
             nonlocal state, azure_client, azure_queue
             logger.info("🟢 AWAITING → SLEEP (%s)", reason)
+            journal("DOZE")
             state = "SLEEP"
             if azure_client is not None:
                 await azure_client.aclose()
