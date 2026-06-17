@@ -599,8 +599,10 @@ async def _run_active_conversation(
     all the way back at the wake word.
     """
     state("ACTIVE")
-    await _safe_async("display.set_expression(THINKING)",
-                      display.set_expression(Expression.THINKING))
+    # Visage d'écoute : NEUTRAL + clignement (timer Nextion) pendant qu'on
+    # attend la question. THINKING est réservé à l'attente de la réponse backend
+    # (posé par ConversationService juste avant l'appel réseau).
+    await _safe_async("display.resume_idle", display.resume_idle())
     await conversation.listen_and_answer()
 
     idle_timeout = max(2.0, config.conversation.active_idle_timeout_s)
@@ -624,7 +626,9 @@ async def _run_active_conversation(
             break  # silent for the whole idle window → back to sleep
 
     state("SLEEP")
-    await _safe_async("display.resume_idle", display.resume_idle())
+    # Retour en veille : visage endormi tant qu'on attend le mot de réveil.
+    await _safe_async("display.set_expression(SLEEPING)",
+                      display.set_expression(Expression.SLEEPING))
 
 
 async def _run_followup_turn(conversation: ConversationService, idle_timeout_s: float) -> bool:

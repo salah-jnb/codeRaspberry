@@ -22,6 +22,22 @@ class Expression(IntEnum):
     SINGING = 9
     THINKING = 10
 
+    @classmethod
+    def from_emotion(cls, emotion: str) -> "Expression":
+        """Catégorie d'émotion renvoyée par le backend → visage à afficher.
+
+        Le backend normalise la grimace « (émotion) » de n8n en l'une de ces
+        catégories. On retombe sur NEUTRAL pour tout ce qu'on ne connaît pas
+        (le backend renvoie « neutral » par défaut)."""
+        return {
+            "happy": cls.HAPPY,
+            "love": cls.LOVE,
+            "angry": cls.ANGRY,
+            "sad": cls.SAD,
+            "surprised": cls.SURPRISED,
+            "neutral": cls.NEUTRAL,
+        }.get((emotion or "").strip().lower(), cls.NEUTRAL)
+
 
 class DisplayService:
     """High-level Nextion face controller; serializes commands and manages blink timer."""

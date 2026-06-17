@@ -274,7 +274,12 @@ class ConversationService:
         if not result.audio_wav:
             logger.warning("text action with no audio WAV — nothing to play")
             return
-        await self._display.set_expression(Expression.SINGING)
+        # Le visage reflète l'émotion de la réponse : le backend a retiré la
+        # grimace « (émotion) » du texte et l'a normalisée en une catégorie
+        # (happy/love/angry/sad/surprised). SINGING reste réservé à la musique.
+        face = Expression.from_emotion(result.expression)
+        logger.info("🙂 Réponse — visage=%s (emotion=%r)", face.name, result.expression)
+        await self._display.set_expression(face)
         await self._play_wav_with_optional_gesture(result.audio_wav)
 
     async def _handle_music_action(self, result: ActionResult) -> None:

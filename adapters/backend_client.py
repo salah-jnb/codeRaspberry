@@ -31,6 +31,10 @@ class ActionResult:
     music_url: Optional[str] = None
     music_title: Optional[str] = None
     motion_command: Optional[str] = None
+    # Catégorie de visage déduite par le backend depuis la grimace « (émotion) »
+    # collée en fin de réponse par n8n : happy / love / angry / sad / surprised
+    # / neutral. La Pi la convertit en Expression à afficher pendant la réponse.
+    expression: str = "neutral"
 
     @classmethod
     def from_json(cls, payload: dict) -> "ActionResult":
@@ -44,6 +48,7 @@ class ActionResult:
             music_url=payload.get("music_url") or None,
             music_title=payload.get("music_title") or None,
             motion_command=payload.get("motion_command") or None,
+            expression=str(payload.get("expression") or "neutral"),
         )
 
 
