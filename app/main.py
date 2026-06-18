@@ -25,6 +25,7 @@ from services.listener.continuous_listener_service import (
     ContinuousListenerService,
     ListenerConfig,
 )
+from services.motion.motion_dispatcher import MotionDispatcher
 from services.motion.motion_service import (
     MotionService,
     RotationCalibration,
@@ -945,6 +946,20 @@ async def run(config: AppConfig) -> None:
         lut=list(config.rotation.lut),
     )
     motion = MotionService(arduino, rotation_calib)
+    motion_dispatcher = MotionDispatcher(
+        motion,
+        move_seconds=config.motion.move_seconds,
+        turn_mode=config.motion.turn_mode,
+        turn_degrees=config.motion.turn_degrees,
+        turn_seconds=config.motion.turn_seconds,
+    )
+    logger.info(
+        "Motion: avancer/reculer=%.1fs, virage=%s (%s)",
+        config.motion.move_seconds,
+        f"{config.motion.turn_degrees:.0f}°" if config.motion.turn_mode != "timed"
+        else f"{config.motion.turn_seconds:.1f}s",
+        config.motion.turn_mode,
+    )
     audio = AudioService(respeaker, config.respeaker.record_seconds)
 
     doa_reader = DOAReader()
@@ -1005,6 +1020,7 @@ async def run(config: AppConfig) -> None:
         listener=listener,
         music_player=music_player,
         face_recognition=face_recognition,
+        motion_dispatcher=motion_dispatcher,
     )
 
     wake_word = _build_wake_word_service(config, audio, backend, respeaker)

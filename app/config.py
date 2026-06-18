@@ -247,6 +247,20 @@ class RotationConfig:
 
 
 @dataclass(frozen=True)
+class MotionConfig:
+    """Comportement des commandes de déplacement venues de n8n
+    (forward / backward / left / right)."""
+    # Avancer / reculer : durée de marche avant l'arrêt automatique.
+    move_seconds: float = 2.0
+    # Tourner à gauche / droite :
+    #   - "angle" : rotation précise en boucle fermée MPU6050 (rotate_by_angle).
+    #   - "timed" : repli sans gyro — on tourne `turn_seconds` puis STOP.
+    turn_mode: str = "angle"
+    turn_degrees: float = 90.0   # utilisé en mode "angle"
+    turn_seconds: float = 0.8    # utilisé en mode "timed" (à calibrer pour ~90°)
+
+
+@dataclass(frozen=True)
 class AppConfig:
     robot_id: str = "koda-01"
     log_level: str = "INFO"
@@ -260,6 +274,7 @@ class AppConfig:
     vosk: VoskConfig = field(default_factory=VoskConfig)
     listener: ListenerConfigEntry = field(default_factory=ListenerConfigEntry)
     rotation: RotationConfig = field(default_factory=RotationConfig)
+    motion: MotionConfig = field(default_factory=MotionConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     face_recognition: FaceRecognitionConfig = field(default_factory=FaceRecognitionConfig)
     hybrid_wake_word: HybridWakeWordConfig = field(default_factory=HybridWakeWordConfig)
@@ -346,6 +361,12 @@ def load_config() -> AppConfig:
         invert_direction=_env_str("ROTATION_INVERT_DIRECTION", "0") in {"1", "true", "yes"},
         lut=_parse_rotation_lut(_env_optional("ROTATION_LUT")),
     )
+    motion = MotionConfig(
+        move_seconds=_env_float("MOTION_MOVE_SECONDS", 2.0),
+        turn_mode=_env_str("MOTION_TURN_MODE", "angle").strip().lower(),
+        turn_degrees=_env_float("MOTION_TURN_DEGREES", 90.0),
+        turn_seconds=_env_float("MOTION_TURN_SECONDS", 0.8),
+    )
     camera = CameraConfig(
         width=_env_int("CAMERA_WIDTH", 1280),
         height=_env_int("CAMERA_HEIGHT", 720),
@@ -393,6 +414,7 @@ def load_config() -> AppConfig:
         vosk=vosk,
         listener=listener,
         rotation=rotation,
+        motion=motion,
         camera=camera,
         face_recognition=face_recognition,
         hybrid_wake_word=hybrid_wake_word,

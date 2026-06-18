@@ -169,6 +169,29 @@ class MotionService:
     async def stop(self) -> None:
         await self._send(ArduinoCommand.STOP)
 
+    async def move_for(self, command: ArduinoCommand, seconds: float) -> MotionResult:
+        """Avancer/reculer en ligne droite pendant ``seconds`` puis STOP auto.
+
+        L'attente est interruptible : un ``request_abort()`` (STOP d'urgence,
+        capteur tactile…) coupe la marche avant la fin et déclenche le STOP
+        immédiatement. Renvoie le ``MotionResult`` du STOP final.
+        """
+        duration = max(0.0, float(seconds))
+        self._abort_event.clear()
+        start = await self._try_send(command)
+        if not start.ok:
+            # Le moteur n'a pas démarré — on tente quand même un STOP par sûreté.
+            await self._try_send(ArduinoCommand.STOP)
+            return start
+        logger.info("🛣️  %s pendant %.2fs puis STOP auto", command.name, duration)
+        if duration > 0:
+            try:
+                await asyncio.wait_for(self._abort_event.wait(), timeout=duration)
+                logger.info("move_for(%s): interrompu avant la fin", command.name)
+            except asyncio.TimeoutError:
+                pass  # durée écoulée normalement → arrêt programmé
+        return await self._try_send(ArduinoCommand.STOP)
+
     async def speed_up(self) -> None:
         await self._send(ArduinoCommand.SPEED_UP)
 
